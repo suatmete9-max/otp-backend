@@ -11,7 +11,7 @@ app.use(express.json());
 const API_KEY = process.env.API_KEY;
 const BASE_URL = 'https://5sim.net/v1';
 const headers = { 'Authorization': `Bearer ${API_KEY}`, 'Accept': 'application/json' };
-const ADMIN_MARGIN = 1.5; // 50% Profit Margin
+const ADMIN_MARGIN = 2.0; // 2x Profit Margin (100% markup)
 const ADMIN_EMAIL = 'bc115078@gmail.com';
 
 const db = new sqlite3.Database('./otp_database.db', (err) => {
@@ -145,14 +145,22 @@ app.get('/api/countries', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Failed" }); }
 });
 
+// FAMOUS SERVICES ONLY + "any" (Any Other) ALWAYS INCLUDED FOR SPEED & STABILITY
 app.get('/api/services', async (req, res) => {
     const { country } = req.query;
     try {
         const response = await axios.get(`${BASE_URL}/guest/prices?country=${country}`);
         const countryData = response.data[country];
-        if(!countryData) return res.json([]);
-        res.json(Object.keys(countryData));
-    } catch (error) { res.status(500).json({ error: "Failed" }); }
+        if(!countryData) return res.json(['any']);
+
+        const allKeys = Object.keys(countryData);
+        const famousList = ['telegram', 'whatsapp', 'google', 'instagram', 'facebook', 'twitter', 'netflix', 'amazon', 'discord', 'tinder', 'microsoft', 'yahoo', 'apple', 'uber', 'openai', 'tiktok', 'snapchat', 'paypal', 'spotify', 'steam', 'any'];
+        
+        let filtered = allKeys.filter(s => famousList.includes(s.toLowerCase()));
+        if (!filtered.includes('any')) filtered.push('any');
+
+        res.json(filtered);
+    } catch (error) { res.json(['any']); }
 });
 
 app.get('/api/price', async (req, res) => {
@@ -160,17 +168,16 @@ app.get('/api/price', async (req, res) => {
     try {
         const response = await axios.get(`${BASE_URL}/guest/prices?country=${country}&product=${service}`);
         const priceData = response.data[country] ? response.data[country][service] : null;
-        if(!priceData) return res.json({ price: 0 });
+        if(!priceData) return res.json({ price: 0.5 });
 
         let lowestPrice = Infinity;
         for (const opKey of Object.keys(priceData)) {
             if (priceData[opKey].cost < lowestPrice) lowestPrice = priceData[opKey].cost;
         }
         res.json({ price: lowestPrice === Infinity ? 0.5 : lowestPrice * ADMIN_MARGIN });
-    } catch (error) { res.status(500).json({ price: 0.5 }); }
+    } catch (error) { res.json({ price: 0.5 }); }
 });
 
-// ROBUST BUY ROUTE
 app.post('/api/buy', async (req, res) => {
     const { country, service, email } = req.body;
     try {
@@ -208,7 +215,6 @@ app.post('/api/buy', async (req, res) => {
 
                 res.json({ id: orderId, phone });
             } catch (buyErr) {
-                // Fallback to 'any' operator if specific failed
                 try {
                     const fallbackRes = await axios.get(`${BASE_URL}/user/buy/activation/${country}/any/${service}`, { headers });
                     const orderId = fallbackRes.data.id.toString();
