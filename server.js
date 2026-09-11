@@ -45,7 +45,6 @@ app.post('/api/login', (req, res) => {
     const myRefCode = 'M' + Math.floor(100000 + Math.random() * 900000);
     const isAdmin = (cleanEmail === ADMIN_EMAIL.toLowerCase()) ? 1 : 0;
 
-    // Auto-create or login user so "User not found" never happens
     db.get(`SELECT * FROM users WHERE email = ?`, [cleanEmail], (err, row) => {
         if (!row) {
             db.run(`INSERT INTO users (name, email, password, balance, last_bonus_date, ref_code, referred_by, is_admin) VALUES (?, ?, ?, 10.0, '', ?, '', ?)`,
@@ -67,7 +66,6 @@ app.post('/api/forgot-password', (req, res) => {
     const { email, newPassword } = req.body;
     if(!email || !newPassword) return res.status(400).json({ error: "Email and new password required" });
     const cleanEmail = email.trim().toLowerCase();
-
     db.run(`UPDATE users SET password = ? WHERE email = ?`, [newPassword, cleanEmail], function(err) {
         res.json({ success: true, message: "Password updated successfully!" });
     });
@@ -76,10 +74,7 @@ app.post('/api/forgot-password', (req, res) => {
 app.get('/api/user-balance', (req, res) => {
     const email = req.query.email ? req.query.email.trim().toLowerCase() : '';
     db.get(`SELECT balance FROM users WHERE email = ?`, [email], (err, row) => {
-        if (err || !row) {
-            db.run(`INSERT OR IGNORE INTO users (name, email, password, balance, ref_code) VALUES (?, ?, '123456', 10.0, 'M999999')`, [email.split('@')[0], email]);
-            return res.json({ balance: 10.0 });
-        }
+        if (err || !row) return res.json({ balance: 10.0 });
         res.json({ balance: row.balance });
     });
 });
@@ -158,17 +153,20 @@ app.get('/api/price', async (req, res) => {
     try {
         const response = await axios.get(`${BASE_URL}/guest/prices?country=${country}&product=${service}`);
         const priceData = response.data[country] ? response.data[country][service] : null;
-        if(!priceData) return res.json({ price: 0.5 });
+        if(!priceData) return res.json({ price: 0.10 });
 
         let lowestPrice = Infinity;
         for (const opKey of Object.keys(priceData)) {
-            if (priceData[opKey].cost < lowestPrice) lowestPrice = priceData[opKey].cost;
+            if (priceData[opKey].cost < lowestPrice && priceData[opKey].count > 0) {
+                lowestPrice = priceData[opKey].cost;
+            }
         }
-        res.json({ price: lowestPrice === Infinity ? 0.5 : lowestPrice * ADMIN_MARGIN });
-    } catch (error) { res.json({ price: 0.5 }); }
+        const baseCost = lowestPrice === Infinity ? 0.05 : lowestPrice;
+        res.json({ price: baseCost * ADMIN_MARGIN });
+    } catch (error) { res.json({ price: 0.10 }); }
 });
 
-// BULLET-PROOF BUY ROUTE (Auto-creates user if missing)
+// STRICT LOWEST PRICE OPERATOR BUY ROUTE
 app.post('/api/buy', async (req, res) => {
     const { country, service, email } = req.body;
     if(!email) return res.status(400).json({ error: "User email required" });
@@ -179,7 +177,7 @@ app.post('/api/buy', async (req, res) => {
         const priceData = pricesRes.data[country] ? pricesRes.data[country][service] : null;
         
         let cheapestOperator = 'any';
-        let lowestPrice = 0.5;
+        let lowestPrice = 0.05;
 
         if (priceData) {
             let minCost = Infinity;
@@ -189,25 +187,30 @@ app.post('/api/buy', async (req, res) => {
                     cheapestOperator = opName;
                 }
             }
-            if (minCost !== Infinity) lowestPrice = minCost;
+            if (minCost !== Infinity) {
+                lowestPrice = minCost;
+            }
         }
 
         const finalPrice = lowestPrice * ADMIN_MARGIN;
 
         db.get(`SELECT balance FROM users WHERE email = ?`, [cleanEmail], async (err, user) => {
             if (!user) {
-                // Auto create user if not found in db
                 db.run(`INSERT INTO users (name, email, password, balance, ref_code) VALUES (?, ?, '123456', 10.0, 'M999999')`, [cleanEmail.split('@')[0], cleanEmail]);
             }
+            
+            const currentBal = user ? user.balance : 10.0;
+            if (currentBal < finalPrice) return res.status(400).json({ error: "Insufficient wallet balance!" });
 
             try {
+                // Force buying from the exact cheapest operator found (e.g. 'any' or specific cheap operator)
                 const response = await axios.get(`${BASE_URL}/user/buy/activation/${country}/${cheapestOperator}/${service}`, { headers });
                 const orderId = response.data.id.toString();
                 const phone = response.data.phone;
 
                 db.run(`UPDATE users SET balance = MAX(0, balance - ?) WHERE email = ?`, [finalPrice, cleanEmail]);
                 db.run(`INSERT INTO orders (id, user_email, service, phone, status, code) VALUES (?, ?, ?, ?, ?, ?)`, [orderId, cleanEmail, service, phone, 'WAITING', '-']);
-                db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [cleanEmail, 'NUMBER PURCHASE', finalPrice, `Service: ${service} (${phone})`, 'APPROVED']);
+                db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [cleanEmail, 'NUMBER PURCHASE', finalPrice, `Service: ${service} (${phone}) [Op: ${cheapestOperator}]`, 'APPROVED']);
 
                 res.json({ id: orderId, phone });
             } catch (buyErr) {
@@ -218,7 +221,7 @@ app.post('/api/buy', async (req, res) => {
 
                     db.run(`UPDATE users SET balance = MAX(0, balance - ?) WHERE email = ?`, [finalPrice, cleanEmail]);
                     db.run(`INSERT INTO orders (id, user_email, service, phone, status, code) VALUES (?, ?, ?, ?, ?, ?)`, [orderId, cleanEmail, service, phone, 'WAITING', '-']);
-                    db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [cleanEmail, 'NUMBER PURCHASE', finalPrice, `Service: ${service} (${phone})`, 'APPROVED']);
+                    db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [cleanEmail, 'NUMBER PURCHASE', finalPrice, `Service: ${service} (${phone}) [Op: any]`, 'APPROVED']);
 
                     res.json({ id: orderId, phone });
                 } catch (fbErr) {
