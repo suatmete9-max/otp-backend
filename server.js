@@ -11,7 +11,7 @@ app.use(express.json());
 const API_KEY = process.env.API_KEY;
 const BASE_URL = 'https://5sim.net/v1';
 const headers = { 'Authorization': `Bearer ${API_KEY}`, 'Accept': 'application/json' };
-const ADMIN_MARGIN = 1.5; // 50% Profit Margin
+const ADMIN_MARGIN = 1.5;
 
 const db = new sqlite3.Database('./otp_database.db', (err) => {
     if (err) console.error('Database error', err);
@@ -20,6 +20,8 @@ const db = new sqlite3.Database('./otp_database.db', (err) => {
 db.serialize(() => {
     db.run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE, password TEXT, balance REAL DEFAULT 0.0, last_bonus_date TEXT)`);
     db.run(`CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, user_email TEXT, service TEXT, phone TEXT, status TEXT, code TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
+    // Transactions table for deposits & bonuses
+    db.run(`CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT, type TEXT, amount REAL, details TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
 });
 
 app.post('/api/signup', (req, res) => {
@@ -46,7 +48,7 @@ app.get('/api/user-balance', (req, res) => {
     });
 });
 
-// DAILY LOGIN BONUS ($0.01)
+// DAILY LOGIN BONUS ($0.01) + Log in transactions
 app.post('/api/claim-bonus', (req, res) => {
     const { email } = req.body;
     const today = new Date().toISOString().slice(0, 10);
@@ -60,10 +62,25 @@ app.post('/api/claim-bonus', (req, res) => {
 
         db.run(`UPDATE users SET balance = balance + 0.01, last_bonus_date = ? WHERE email = ?`, [today, email], function(err) {
             if (err) return res.status(500).json({ error: "Failed to claim bonus" });
+            
+            // Log transaction
+            db.run(`INSERT INTO transactions (user_email, type, amount, details) VALUES (?, ?, ?, ?)`, [email, 'DAILY BONUS', 0.01, 'Claimed Daily Login Bonus']);
+
             db.get(`SELECT balance FROM users WHERE email = ?`, [email], (err, updatedUser) => {
                 res.json({ success: true, balance: updatedUser.balance, message: "Successfully claimed $0.01 Daily Bonus!" });
             });
         });
+    });
+});
+
+// SUBMIT CRYPTO DEPOSIT
+app.post('/api/deposit', (req, res) => {
+    const { email, amount, txId } = req.body;
+    if(!email || !amount || !txId) return res.status(400).json({ error: "All fields required" });
+
+    db.run(`INSERT INTO transactions (user_email, type, amount, details) VALUES (?, ?, ?, ?)`, [email, 'CRYPTO DEPOSIT', amount, `TxID: ${txId} (Pending Verification)`], function(err) {
+        if(err) return res.status(500).json({ error: "Failed to submit deposit" });
+        res.json({ success: true, message: "Deposit submitted successfully!" });
     });
 });
 
@@ -74,7 +91,6 @@ app.get('/api/countries', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Failed" }); }
 });
 
-// FAST SERVICES LIST (No heavy price calculation inside dropdown)
 app.get('/api/services', async (req, res) => {
     const { country } = req.query;
     try {
@@ -127,6 +143,7 @@ app.post('/api/buy', async (req, res) => {
 
                 db.run(`UPDATE users SET balance = balance - ? WHERE email = ?`, [finalPrice, email]);
                 db.run(`INSERT INTO orders (id, user_email, service, phone, status, code) VALUES (?, ?, ?, ?, ?, ?)`, [orderId, email, service, phone, 'WAITING', '-']);
+                db.run(`INSERT INTO transactions (user_email, type, amount, details) VALUES (?, ?, ?, ?)`, [email, 'NUMBER PURCHASE', finalPrice, `Service: ${service} (${phone})`]);
 
                 res.json({ id: orderId, phone });
             } catch (buyErr) {
@@ -136,10 +153,14 @@ app.post('/api/buy', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Process failed" }); }
 });
 
-app.get('/api/orders', (req, res) => {
+// COMBINED HISTORY (Orders + Transactions)
+app.get('/api/history', (req, res) => {
     const { email } = req.query;
-    db.all(`SELECT * FROM orders WHERE user_email = ? ORDER BY created_at DESC`, [email], (err, rows) => {
-        if (err) return res.status(500).json({ error: "Failed to fetch orders" });
+    db.all(`SELECT type as category, amount as cost, details as info, created_at FROM transactions WHERE user_email = ? 
+            UNION ALL 
+            SELECT 'NUMBER ORDER' as category, 0 as cost, 'Service: ' || service || ' | Phone: ' || phone || ' | Status: ' || status as info, created_at FROM orders WHERE user_email = ? 
+            ORDER BY created_at DESC`, [email, email], (err, rows) => {
+        if (err) return res.status(500).json({ error: "Failed to fetch history" });
         res.json(rows);
     });
 });
