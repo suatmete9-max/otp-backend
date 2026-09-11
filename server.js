@@ -148,51 +148,45 @@ app.get('/api/services', async (req, res) => {
     } catch (error) { res.json(['any']); }
 });
 
-app.get('/api/price', async (req, res) => {
+// GET OPERATORS & PRICES FOR SELECTED COUNTRY + SERVICE
+app.get('/api/operators', async (req, res) => {
     const { country, service } = req.query;
     try {
         const response = await axios.get(`${BASE_URL}/guest/prices?country=${country}&product=${service}`);
         const priceData = response.data[country] ? response.data[country][service] : null;
-        if(!priceData) return res.json({ price: 0.10 });
+        if(!priceData) return res.json([]);
 
-        let lowestPrice = Infinity;
-        for (const opKey of Object.keys(priceData)) {
-            if (priceData[opKey].cost < lowestPrice && priceData[opKey].count > 0) {
-                lowestPrice = priceData[opKey].cost;
-            }
+        let operatorsList = [];
+        for (const [opName, opDetails] of Object.entries(priceData)) {
+            operatorsList.push({
+                operator: opName,
+                cost: opDetails.cost * ADMIN_MARGIN,
+                count: opDetails.count
+            });
         }
-        const baseCost = lowestPrice === Infinity ? 0.05 : lowestPrice;
-        res.json({ price: baseCost * ADMIN_MARGIN });
-    } catch (error) { res.json({ price: 0.10 }); }
+        res.json(operatorsList);
+    } catch (error) { res.json([]); }
 });
 
-// STRICT LOWEST PRICE OPERATOR BUY ROUTE
+// BUY WITH SPECIFIC OPERATOR
 app.post('/api/buy', async (req, res) => {
-    const { country, service, email } = req.body;
+    const { country, service, operator, email } = req.body;
     if(!email) return res.status(400).json({ error: "User email required" });
     const cleanEmail = email.trim().toLowerCase();
+    const selectedOp = operator || 'any';
 
     try {
         const pricesRes = await axios.get(`${BASE_URL}/guest/prices?country=${country}&product=${service}`);
         const priceData = pricesRes.data[country] ? pricesRes.data[country][service] : null;
         
-        let cheapestOperator = 'any';
-        let lowestPrice = 0.05;
-
-        if (priceData) {
-            let minCost = Infinity;
-            for (const [opName, opDetails] of Object.entries(priceData)) {
-                if (opDetails.cost < minCost && opDetails.count > 0) {
-                    minCost = opDetails.cost;
-                    cheapestOperator = opName;
-                }
-            }
-            if (minCost !== Infinity) {
-                lowestPrice = minCost;
-            }
+        let opCost = 0.05;
+        if (priceData && priceData[selectedOp]) {
+            opCost = priceData[selectedOp].cost;
+        } else if (priceData && priceData['any']) {
+            opCost = priceData['any'].cost;
         }
 
-        const finalPrice = lowestPrice * ADMIN_MARGIN;
+        const finalPrice = opCost * ADMIN_MARGIN;
 
         db.get(`SELECT balance FROM users WHERE email = ?`, [cleanEmail], async (err, user) => {
             if (!user) {
@@ -203,14 +197,13 @@ app.post('/api/buy', async (req, res) => {
             if (currentBal < finalPrice) return res.status(400).json({ error: "Insufficient wallet balance!" });
 
             try {
-                // Force buying from the exact cheapest operator found (e.g. 'any' or specific cheap operator)
-                const response = await axios.get(`${BASE_URL}/user/buy/activation/${country}/${cheapestOperator}/${service}`, { headers });
+                const response = await axios.get(`${BASE_URL}/user/buy/activation/${country}/${selectedOp}/${service}`, { headers });
                 const orderId = response.data.id.toString();
                 const phone = response.data.phone;
 
                 db.run(`UPDATE users SET balance = MAX(0, balance - ?) WHERE email = ?`, [finalPrice, cleanEmail]);
                 db.run(`INSERT INTO orders (id, user_email, service, phone, status, code) VALUES (?, ?, ?, ?, ?, ?)`, [orderId, cleanEmail, service, phone, 'WAITING', '-']);
-                db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [cleanEmail, 'NUMBER PURCHASE', finalPrice, `Service: ${service} (${phone}) [Op: ${cheapestOperator}]`, 'APPROVED']);
+                db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [cleanEmail, 'NUMBER PURCHASE', finalPrice, `Service: ${service} (${phone}) [Op: ${selectedOp}]`, 'APPROVED']);
 
                 res.json({ id: orderId, phone });
             } catch (buyErr) {
