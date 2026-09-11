@@ -49,7 +49,7 @@ app.get('/api/user-balance', (req, res) => {
 // DAILY LOGIN BONUS ($0.01)
 app.post('/api/claim-bonus', (req, res) => {
     const { email } = req.body;
-    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const today = new Date().toISOString().slice(0, 10);
 
     db.get(`SELECT last_bonus_date, balance FROM users WHERE email = ?`, [email], (err, user) => {
         if (err || !user) return res.status(400).json({ error: "User not found" });
@@ -74,26 +74,14 @@ app.get('/api/countries', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Failed" }); }
 });
 
-app.get('/api/services-with-prices', async (req, res) => {
+// FAST SERVICES LIST (No heavy price calculation inside dropdown)
+app.get('/api/services', async (req, res) => {
     const { country } = req.query;
     try {
         const response = await axios.get(`${BASE_URL}/guest/prices?country=${country}`);
         const countryData = response.data[country];
-        if(!countryData) return res.json({});
-
-        const servicePrices = {};
-        for (const [service, operators] of Object.entries(countryData)) {
-            let lowestPrice = Infinity;
-            for (const opKey of Object.keys(operators)) {
-                if (operators[opKey].cost < lowestPrice) {
-                    lowestPrice = operators[opKey].cost;
-                }
-            }
-            if(lowestPrice !== Infinity) {
-                servicePrices[service] = (lowestPrice * ADMIN_MARGIN).toFixed(3);
-            }
-        }
-        res.json(servicePrices);
+        if(!countryData) return res.json([]);
+        res.json(Object.keys(countryData));
     } catch (error) { res.status(500).json({ error: "Failed to fetch services" }); }
 });
 
