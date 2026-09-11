@@ -18,9 +18,9 @@ const db = new sqlite3.Database('./otp_database.db', (err) => {
 });
 
 db.serialize(() => {
-    db.run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, email TEXT UNIQUE, password TEXT, balance REAL DEFAULT 0.0, last_bonus_date TEXT, ref_code TEXT, referred_by TEXT)`);
+    db.run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, email TEXT UNIQUE, password TEXT, balance REAL DEFAULT 0.0, last_bonus_date TEXT, ref_code TEXT, referred_by TEXT, is_admin INTEGER DEFAULT 0)`);
     db.run(`CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, user_email TEXT, service TEXT, phone TEXT, status TEXT, code TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
-    db.run(`CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT, type TEXT, amount REAL, details TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
+    db.run(`CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT, type TEXT, amount REAL, details TEXT, status TEXT DEFAULT 'PENDING', created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
 });
 
 app.post('/api/signup', (req, res) => {
@@ -38,7 +38,7 @@ app.post('/api/login', (req, res) => {
     const { email, password } = req.body;
     db.get(`SELECT * FROM users WHERE email = ? AND password = ?`, [email, password], (err, row) => {
         if (err || !row) return res.status(400).json({ error: "Invalid email or password!" });
-        res.json({ success: true, email: row.email, name: row.name, balance: row.balance, refCode: row.ref_code });
+        res.json({ success: true, email: row.email, name: row.name, balance: row.balance, refCode: row.ref_code, isAdmin: row.is_admin });
     });
 });
 
@@ -63,27 +63,48 @@ app.get('/api/user-balance', (req, res) => {
     });
 });
 
-// APPLY REFERRAL CODE ROUTE ($0.05 bonus)
+// ADMIN: Get all pending/all deposits
+app.get('/api/admin/deposits', (req, res) => {
+    db.all(`SELECT * FROM transactions WHERE type = 'CRYPTO DEPOSIT' ORDER BY created_at DESC`, [], (err, rows) => {
+        if (err) return res.status(500).json({ error: "Failed to fetch deposits" });
+        res.json(rows);
+    });
+});
+
+// ADMIN: Approve Deposit & Add Funds to User
+app.post('/api/admin/approve-deposit', (req, res) => {
+    const { depositId, email, amount } = req.body;
+    
+    db.run(`UPDATE transactions SET status = 'APPROVED' WHERE id = ?`, [depositId], function(err) {
+        if (err) return res.status(500).json({ error: "Failed to update deposit status" });
+
+        db.run(`UPDATE users SET balance = balance + ? WHERE email = ?`, [parseFloat(amount), email], function(err) {
+            if (err) return res.status(500).json({ error: "Failed to add balance" });
+            
+            db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, 
+            [email, 'ADMIN FUND ADD', parseFloat(amount), 'Deposit Approved & Credited', 'APPROVED']);
+
+            res.json({ success: true, message: `Successfully approved $${amount} for ${email}` });
+        });
+    });
+});
+
 app.post('/api/apply-referral', (req, res) => {
     const { email, refCode } = req.body;
     if(!email || !refCode) return res.status(400).json({ error: "Email and code required" });
 
     db.get(`SELECT * FROM users WHERE email = ?`, [email], (err, user) => {
         if(err || !user) return res.status(400).json({ error: "User not found" });
-        if(user.referred_by) return res.status(400).json({ error: "You have already applied a referral code!" });
-        if(user.ref_code === refCode) return res.status(400).json({ error: "You cannot use your own referral code!" });
+        if(user.referred_by) return res.status(400).json({ error: "Already applied a referral code!" });
+        if(user.ref_code === refCode) return res.status(400).json({ error: "Cannot use your own code!" });
 
         db.get(`SELECT * FROM users WHERE ref_code = ?`, [refCode], (err, referrer) => {
             if(err || !referrer) return res.status(400).json({ error: "Invalid referral code!" });
 
-            // Update user with referrer and give $0.05 bonus
             db.run(`UPDATE users SET referred_by = ?, balance = balance + 0.05 WHERE email = ?`, [refCode, email], function(err) {
-                if(err) return res.status(500).json({ error: "Failed to apply code" });
-
-                db.run(`INSERT INTO transactions (user_email, type, amount, details) VALUES (?, ?, ?, ?)`, [email, 'REFERRAL BONUS', 0.05, `Bonus for using code ${refCode}`]);
-                
+                db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [email, 'REFERRAL BONUS', 0.05, `Bonus from code ${refCode}`, 'APPROVED']);
                 db.get(`SELECT balance FROM users WHERE email = ?`, [email], (err, updatedUser) => {
-                    res.json({ success: true, balance: updatedUser.balance, message: "Referral code applied successfully! $0.05 added to your wallet." });
+                    res.json({ success: true, balance: updatedUser.balance, message: "Referral code applied! $0.05 added." });
                 });
             });
         });
@@ -101,7 +122,7 @@ app.post('/api/claim-bonus', (req, res) => {
         }
 
         db.run(`UPDATE users SET balance = balance + 0.01, last_bonus_date = ? WHERE email = ?`, [today, email], function(err) {
-            db.run(`INSERT INTO transactions (user_email, type, amount, details) VALUES (?, ?, ?, ?)`, [email, 'DAILY BONUS', 0.01, 'Claimed Daily Login Bonus']);
+            db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [email, 'DAILY BONUS', 0.01, 'Claimed Daily Login Bonus', 'APPROVED']);
             db.get(`SELECT balance FROM users WHERE email = ?`, [email], (err, updatedUser) => {
                 res.json({ success: true, balance: updatedUser.balance, message: "Successfully claimed $0.01 Daily Bonus!" });
             });
@@ -113,7 +134,7 @@ app.post('/api/deposit', (req, res) => {
     const { email, amount, txId } = req.body;
     if(!email || !amount || !txId) return res.status(400).json({ error: "All fields required" });
 
-    db.run(`INSERT INTO transactions (user_email, type, amount, details) VALUES (?, ?, ?, ?)`, [email, 'CRYPTO DEPOSIT', amount, `TxID: ${txId} (Pending Verification)`], function(err) {
+    db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [email, 'CRYPTO DEPOSIT', amount, `TxID: ${txId}`, 'PENDING'], function(err) {
         if(err) return res.status(500).json({ error: "Failed" });
         res.json({ success: true, message: "Deposit submitted successfully!" });
     });
@@ -179,7 +200,7 @@ app.post('/api/buy', async (req, res) => {
 
                 db.run(`UPDATE users SET balance = balance - ? WHERE email = ?`, [finalPrice, email]);
                 db.run(`INSERT INTO orders (id, user_email, service, phone, status, code) VALUES (?, ?, ?, ?, ?, ?)`, [orderId, email, service, phone, 'WAITING', '-']);
-                db.run(`INSERT INTO transactions (user_email, type, amount, details) VALUES (?, ?, ?, ?)`, [email, 'NUMBER PURCHASE', finalPrice, `Service: ${service} (${phone})`]);
+                db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [email, 'NUMBER PURCHASE', finalPrice, `Service: ${service} (${phone})`, 'APPROVED']);
 
                 res.json({ id: orderId, phone });
             } catch (buyErr) {
@@ -191,9 +212,9 @@ app.post('/api/buy', async (req, res) => {
 
 app.get('/api/history', (req, res) => {
     const { email } = req.query;
-    db.all(`SELECT type as category, amount as cost, details as info, created_at FROM transactions WHERE user_email = ? 
+    db.all(`SELECT type as category, amount as cost, details as info, status, created_at FROM transactions WHERE user_email = ? 
             UNION ALL 
-            SELECT 'NUMBER ORDER' as category, 0 as cost, 'Service: ' || service || ' | Phone: ' || phone || ' | Status: ' || status as info, created_at FROM orders WHERE user_email = ? 
+            SELECT 'NUMBER ORDER' as category, 0 as cost, 'Service: ' || service || ' | Phone: ' || phone || ' | Status: ' || status as info, status, created_at FROM orders WHERE user_email = ? 
             ORDER BY created_at DESC`, [email, email], (err, rows) => {
         if (err) return res.status(500).json({ error: "Failed" });
         res.json(rows);
