@@ -157,7 +157,7 @@ app.get('/api/countries', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Failed" }); }
 });
 
-// LIGHTWEIGHT FAST SERVICES + "any" (Any Other) ALWAYS INCLUDED
+// FULL UNLOCKED SERVICES (ALL AVAILABLE SERVICES + ANY)
 app.get('/api/services', async (req, res) => {
     const { country } = req.query;
     try {
