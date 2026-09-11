@@ -63,6 +63,33 @@ app.get('/api/user-balance', (req, res) => {
     });
 });
 
+// APPLY REFERRAL CODE ROUTE ($0.05 bonus)
+app.post('/api/apply-referral', (req, res) => {
+    const { email, refCode } = req.body;
+    if(!email || !refCode) return res.status(400).json({ error: "Email and code required" });
+
+    db.get(`SELECT * FROM users WHERE email = ?`, [email], (err, user) => {
+        if(err || !user) return res.status(400).json({ error: "User not found" });
+        if(user.referred_by) return res.status(400).json({ error: "You have already applied a referral code!" });
+        if(user.ref_code === refCode) return res.status(400).json({ error: "You cannot use your own referral code!" });
+
+        db.get(`SELECT * FROM users WHERE ref_code = ?`, [refCode], (err, referrer) => {
+            if(err || !referrer) return res.status(400).json({ error: "Invalid referral code!" });
+
+            // Update user with referrer and give $0.05 bonus
+            db.run(`UPDATE users SET referred_by = ?, balance = balance + 0.05 WHERE email = ?`, [refCode, email], function(err) {
+                if(err) return res.status(500).json({ error: "Failed to apply code" });
+
+                db.run(`INSERT INTO transactions (user_email, type, amount, details) VALUES (?, ?, ?, ?)`, [email, 'REFERRAL BONUS', 0.05, `Bonus for using code ${refCode}`]);
+                
+                db.get(`SELECT balance FROM users WHERE email = ?`, [email], (err, updatedUser) => {
+                    res.json({ success: true, balance: updatedUser.balance, message: "Referral code applied successfully! $0.05 added to your wallet." });
+                });
+            });
+        });
+    });
+});
+
 app.post('/api/claim-bonus', (req, res) => {
     const { email } = req.body;
     const today = new Date().toISOString().slice(0, 10);
@@ -88,36 +115,14 @@ app.post('/api/deposit', (req, res) => {
 
     db.run(`INSERT INTO transactions (user_email, type, amount, details) VALUES (?, ?, ?, ?)`, [email, 'CRYPTO DEPOSIT', amount, `TxID: ${txId} (Pending Verification)`], function(err) {
         if(err) return res.status(500).json({ error: "Failed" });
-        
-        // Give $0.05 referral bonus on first deposit if referred
-        db.get(`SELECT referred_by FROM users WHERE email = ?`, [email], (err, u) => {
-            if(u && u.referred_by) {
-                db.run(`UPDATE users SET balance = balance + 0.05 WHERE ref_code = ?`, [u.referred_by]);
-                db.run(`INSERT INTO transactions (user_email, type, amount, details) VALUES ((SELECT email FROM users WHERE ref_code = ?), ?, ?, ?)`, [u.referred_by, 'REFERRAL BONUS', 0.05, `Bonus from referral deposit`]);
-            }
-        });
-
         res.json({ success: true, message: "Deposit submitted successfully!" });
     });
 });
 
-// SERVER 1, SERVER 2, SERVER 3 (Dividing countries into 3 equal chunks for fast load)
-app.get('/api/countries/:serverNum', async (req, res) => {
-    const serverNum = parseInt(req.params.serverNum) || 1;
+app.get('/api/countries', async (req, res) => {
     try {
         const response = await axios.get(`${BASE_URL}/guest/countries`);
-        const allCountries = response.data;
-        const keys = Object.keys(allCountries);
-        const third = Math.ceil(keys.length / 3);
-        
-        let chunkKeys = [];
-        if (serverNum === 1) chunkKeys = keys.slice(0, third);
-        else if (serverNum === 2) chunkKeys = keys.slice(third, third * 2);
-        else chunkKeys = keys.slice(third * 2);
-
-        let chunkObj = {};
-        chunkKeys.forEach(k => { chunkObj[k] = allCountries[k]; });
-        res.json(chunkObj);
+        res.json(response.data);
     } catch (error) { res.status(500).json({ error: "Failed" }); }
 });
 
