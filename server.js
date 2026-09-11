@@ -66,7 +66,6 @@ app.get('/api/user-balance', (req, res) => {
     });
 });
 
-// ADMIN: Get all pending/all deposits
 app.get('/api/admin/deposits', (req, res) => {
     db.all(`SELECT * FROM transactions WHERE type = 'CRYPTO DEPOSIT' ORDER BY created_at DESC`, [], (err, rows) => {
         if (err) return res.status(500).json({ error: "Failed to fetch deposits" });
@@ -74,19 +73,15 @@ app.get('/api/admin/deposits', (req, res) => {
     });
 });
 
-// ADMIN: Approve Deposit & Add Funds to User
 app.post('/api/admin/approve-deposit', (req, res) => {
     const { depositId, email, amount } = req.body;
-    
     db.run(`UPDATE transactions SET status = 'APPROVED' WHERE id = ?`, [depositId], function(err) {
         if (err) return res.status(500).json({ error: "Failed to update deposit status" });
 
         db.run(`UPDATE users SET balance = balance + ? WHERE email = ?`, [parseFloat(amount), email], function(err) {
             if (err) return res.status(500).json({ error: "Failed to add balance" });
-            
             db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, 
             [email, 'ADMIN FUND ADD', parseFloat(amount), 'Deposit Approved & Credited', 'APPROVED']);
-
             res.json({ success: true, message: `Successfully approved $${amount} for ${email}` });
         });
     });
@@ -164,31 +159,37 @@ app.get('/api/price', async (req, res) => {
     const { country, service } = req.query;
     try {
         const response = await axios.get(`${BASE_URL}/guest/prices?country=${country}&product=${service}`);
-        const priceData = response.data[country][service];
+        const priceData = response.data[country] ? response.data[country][service] : null;
+        if(!priceData) return res.json({ price: 0 });
+
         let lowestPrice = Infinity;
         for (const opKey of Object.keys(priceData)) {
             if (priceData[opKey].cost < lowestPrice) lowestPrice = priceData[opKey].cost;
         }
-        res.json({ price: lowestPrice * ADMIN_MARGIN });
-    } catch (error) { res.status(500).json({ error: "Price check failed" }); }
+        res.json({ price: lowestPrice === Infinity ? 0.5 : lowestPrice * ADMIN_MARGIN });
+    } catch (error) { res.status(500).json({ price: 0.5 }); }
 });
 
+// ROBUST BUY ROUTE
 app.post('/api/buy', async (req, res) => {
     const { country, service, email } = req.body;
     try {
         const pricesRes = await axios.get(`${BASE_URL}/guest/prices?country=${country}&product=${service}`);
         const priceData = pricesRes.data[country] ? pricesRes.data[country][service] : null;
-        if (!priceData) return res.status(400).json({ error: "Service out of stock." });
-
+        
         let cheapestOperator = 'any';
-        let lowestPrice = Infinity;
-        for (const [opName, opDetails] of Object.entries(priceData)) {
-            if (opDetails.cost < lowestPrice && opDetails.count > 0) {
-                lowestPrice = opDetails.cost;
-                cheapestOperator = opName;
+        let lowestPrice = 0.5;
+
+        if (priceData) {
+            let minCost = Infinity;
+            for (const [opName, opDetails] of Object.entries(priceData)) {
+                if (opDetails.cost < minCost && opDetails.count > 0) {
+                    minCost = opDetails.cost;
+                    cheapestOperator = opName;
+                }
             }
+            if (minCost !== Infinity) lowestPrice = minCost;
         }
-        if (lowestPrice === Infinity) return res.status(400).json({ error: "No stock available." });
 
         const finalPrice = lowestPrice * ADMIN_MARGIN;
 
@@ -207,10 +208,23 @@ app.post('/api/buy', async (req, res) => {
 
                 res.json({ id: orderId, phone });
             } catch (buyErr) {
-                res.status(500).json({ error: "Buy failed from provider." });
+                // Fallback to 'any' operator if specific failed
+                try {
+                    const fallbackRes = await axios.get(`${BASE_URL}/user/buy/activation/${country}/any/${service}`, { headers });
+                    const orderId = fallbackRes.data.id.toString();
+                    const phone = fallbackRes.data.phone;
+
+                    db.run(`UPDATE users SET balance = balance - ? WHERE email = ?`, [finalPrice, email]);
+                    db.run(`INSERT INTO orders (id, user_email, service, phone, status, code) VALUES (?, ?, ?, ?, ?, ?)`, [orderId, email, service, phone, 'WAITING', '-']);
+                    db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [email, 'NUMBER PURCHASE', finalPrice, `Service: ${service} (${phone})`, 'APPROVED']);
+
+                    res.json({ id: orderId, phone });
+                } catch (fbErr) {
+                    res.status(500).json({ error: "Number currently out of stock from provider." });
+                }
             }
         });
-    } catch (error) { res.status(500).json({ error: "Process failed." }); }
+    } catch (error) { res.status(500).json({ error: "Process failed or out of stock." }); }
 });
 
 app.get('/api/history', (req, res) => {
