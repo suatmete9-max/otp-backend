@@ -11,7 +11,7 @@ app.use(express.json());
 const API_KEY = process.env.API_KEY;
 const BASE_URL = 'https://5sim.net/v1';
 const headers = { 'Authorization': `Bearer ${API_KEY}`, 'Accept': 'application/json' };
-const ADMIN_MARGIN = 1.3; // 30% Admin Profit Margin
+const ADMIN_MARGIN = 1.5; // 50% Profit Margin
 
 const db = new sqlite3.Database('./otp_database.db', (err) => {
     if (err) console.error('Database error', err);
@@ -24,9 +24,9 @@ db.serialize(() => {
 
 app.post('/api/signup', (req, res) => {
     const { email, password } = req.body;
-    db.run(`INSERT INTO users (email, password) VALUES (?, ?)`, [email, password], function(err) {
+    db.run(`INSERT INTO users (email, password, balance) VALUES (?, ?, 0.0)`, [email, password], function(err) {
         if (err) return res.status(400).json({ error: "Email already registered!" });
-        res.json({ success: true, email });
+        res.json({ success: true, email, balance: 0.0 });
     });
 });
 
@@ -38,11 +38,24 @@ app.post('/api/login', (req, res) => {
     });
 });
 
-app.get('/api/balance', async (req, res) => {
-    try {
-        const response = await axios.get(`${BASE_URL}/user/profile`, { headers });
-        res.json({ balance: response.data.balance });
-    } catch (error) { res.status(500).json({ error: "Balance fetch failed" }); }
+// User specific wallet balance
+app.get('/api/user-balance', (req, res) => {
+    const { email } = req.query;
+    db.get(`SELECT balance FROM users WHERE email = ?`, [email], (err, row) => {
+        if (err || !row) return res.status(404).json({ error: "User not found" });
+        res.json({ balance: row.balance });
+    });
+});
+
+// Add funds to user wallet
+app.post('/api/add-funds', (req, res) => {
+    const { email, amount } = req.body;
+    db.run(`UPDATE users SET balance = balance + ? WHERE email = ?`, [amount, email], function(err) {
+        if (err) return res.status(400).json({ error: "Failed to add funds" });
+        db.get(`SELECT balance FROM users WHERE email = ?`, [email], (err, row) => {
+            res.json({ success: true, balance: row.balance });
+        });
+    });
 });
 
 app.get('/api/countries', async (req, res) => {
@@ -52,7 +65,6 @@ app.get('/api/countries', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Failed" }); }
 });
 
-// Country-wise services filter route
 app.get('/api/services', async (req, res) => {
     const { country } = req.query;
     try {
@@ -81,6 +93,7 @@ app.post('/api/buy', async (req, res) => {
     try {
         const pricesRes = await axios.get(`${BASE_URL}/guest/prices?country=${country}&product=${service}`);
         const priceData = pricesRes.data[country][service];
+        
         let cheapestOperator = 'any';
         let lowestPrice = Infinity;
         for (const [opName, opDetails] of Object.entries(priceData)) {
@@ -89,12 +102,28 @@ app.post('/api/buy', async (req, res) => {
                 cheapestOperator = opName;
             }
         }
-        const response = await axios.get(`${BASE_URL}/user/buy/activation/${country}/${cheapestOperator}/${service}`, { headers });
-        const orderId = response.data.id.toString();
-        const phone = response.data.phone;
-        db.run(`INSERT INTO orders (id, user_email, service, phone, status, code) VALUES (?, ?, ?, ?, ?, ?)`, [orderId, email || 'guest', service, phone, 'WAITING', '-']);
-        res.json({ id: orderId, phone });
-    } catch (error) { res.status(500).json({ error: "Buy failed" }); }
+        const finalPrice = lowestPrice * ADMIN_MARGIN;
+
+        db.get(`SELECT balance FROM users WHERE email = ?`, [email], async (err, user) => {
+            if (err || !user) return res.status(400).json({ error: "User not found" });
+            if (user.balance < finalPrice) {
+                return res.status(400).json({ error: "Insufficient wallet balance! Please add funds." });
+            }
+
+            try {
+                const response = await axios.get(`${BASE_URL}/user/buy/activation/${country}/${cheapestOperator}/${service}`, { headers });
+                const orderId = response.data.id.toString();
+                const phone = response.data.phone;
+
+                db.run(`UPDATE users SET balance = balance - ? WHERE email = ?`, [finalPrice, email]);
+                db.run(`INSERT INTO orders (id, user_email, service, phone, status, code) VALUES (?, ?, ?, ?, ?, ?)`, [orderId, email, service, phone, 'WAITING', '-']);
+
+                res.json({ id: orderId, phone });
+            } catch (buyErr) {
+                res.status(500).json({ error: "Number out of stock or buy failed" });
+            }
+        });
+    } catch (error) { res.status(500).json({ error: "Process failed" }); }
 });
 
 app.get('/api/check/:id', async (req, res) => {
@@ -118,7 +147,24 @@ app.get('/api/cancel/:id', async (req, res) => {
         const response = await axios.get(`${BASE_URL}/user/cancel/${orderId}`, { headers });
         db.run(`UPDATE orders SET status = 'REFUNDED' WHERE id = ?`, [orderId]);
         res.json({ status: response.data.status });
-    } catch (error) { res.status(500).json({ error: "Cancel failed" }); }
-});
+    } catchGot it! You want to update your OTP panel (`otp-hub.vercel.app`) with three main changes:
 
-app.listen(3000, () => console.log('Server running on port 3000'));
+1. **User Wallet Balance:** Fix the dashboard so that each logged-in user sees **their own deposited wallet balance** rather than the master provider/admin account balance (like the $1.345 shown in the top right).
+2. **50% Profit Margin:** Apply an automatic pricing formula that adds a **50% markup** on top of the base provider prices so you earn 50% profit on every transaction.
+3. **"Cheapest" Server & "Any Other" Service:** Create a special server option labeled **"Cheapest"** that includes all countries, and set the service name/category to **"Any Other"** while ensuring your 50% margin applies universally across all services and countries.
+
+---
+
+### 1. User Wallet Balance Logic
+Instead of fetching the master 5sim API balance for the user, you need to fetch the user's wallet balance from your database (e.g., MongoDB/Supabase/Firebase) where their deposited funds are stored.
+
+**Example Code (Frontend/Backend adjustment):**
+```javascript
+// Fetch user's actual wallet balance from your database after login
+async function loadUserWallet(userId) {
+    const response = await fetch(`/api/get-user-balance?userId=${userId}`);
+    const data = await response.json();
+    
+    // Update the UI balance display
+    document.getElementById('user-balance').innerText = `$${data.walletBalance.toFixed(3)}`;
+}
