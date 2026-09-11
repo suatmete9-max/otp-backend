@@ -39,6 +39,21 @@ app.post('/api/login', (req, res) => {
     });
 });
 
+// FORGOT / RESET PASSWORD ROUTE
+app.post('/api/forgot-password', (req, res) => {
+    const { email, newPassword } = req.body;
+    if(!email || !newPassword) return res.status(400).json({ error: "Email and new password required" });
+
+    db.get(`SELECT * FROM users WHERE email = ?`, [email], (err, user) => {
+        if (err || !user) return res.status(400).json({ error: "Email not found in system!" });
+
+        db.run(`UPDATE users SET password = ? WHERE email = ?`, [newPassword, email], function(err) {
+            if (err) return res.status(500).json({ error: "Failed to reset password" });
+            res.json({ success: true, message: "Password reset successfully! You can now login." });
+        });
+    });
+});
+
 app.get('/api/user-balance', (req, res) => {
     const { email } = req.query;
     db.get(`SELECT balance FROM users WHERE email = ?`, [email], (err, row) => {
@@ -47,21 +62,19 @@ app.get('/api/user-balance', (req, res) => {
     });
 });
 
-// ADMIN: View all deposits
 app.get('/api/admin/deposits', (req, res) => {
     db.all(`SELECT * FROM transactions WHERE type = 'CRYPTO DEPOSIT' ORDER BY created_at DESC`, [], (err, rows) => {
-        if (err) return res.status(500).json({ error: "Failed to fetch deposits" });
+        if (err) return res.status(500).json({ error: "Failed" });
         res.json(rows);
     });
 });
 
-// ADMIN: Add balance directly to user
 app.get('/api/admin/add-balance', (req, res) => {
     const { email, amount } = req.query;
     if(!email || !amount) return res.status(400).json({ error: "Email and amount required" });
 
     db.run(`UPDATE users SET balance = balance + ? WHERE email = ?`, [parseFloat(amount), email], function(err) {
-        if(err) return res.status(500).json({ error: "Failed to update balance" });
+        if(err) return res.status(500).json({ error: "Failed" });
         db.run(`INSERT INTO transactions (user_email, type, amount, details) VALUES (?, ?, ?, ?)`, [email, 'ADMIN FUND ADD', parseFloat(amount), 'Manually added by Admin']);
         res.json({ success: true, message: `Successfully added $${amount} to ${email}` });
     });
