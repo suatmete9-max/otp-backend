@@ -11,7 +11,7 @@ app.use(express.json());
 const API_KEY = process.env.API_KEY;
 const BASE_URL = 'https://5sim.net/v1';
 const headers = { 'Authorization': `Bearer ${API_KEY}`, 'Accept': 'application/json' };
-const ADMIN_MARGIN = 1.3;
+const ADMIN_MARGIN = 1.3; // 30% Admin Profit Margin
 
 const db = new sqlite3.Database('./otp_database.db', (err) => {
     if (err) console.error('Database error', err);
@@ -52,17 +52,14 @@ app.get('/api/countries', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Failed" }); }
 });
 
-// COUNTRY-WISE SERVICES FETCH (Smart Filter)
+// Country-wise services filter route
 app.get('/api/services', async (req, res) => {
     const { country } = req.query;
     try {
         const response = await axios.get(`${BASE_URL}/guest/prices?country=${country}`);
         const countryData = response.data[country];
         if(!countryData) return res.json([]);
-        
-        // Sirf wahi services return karein jinka stock available ho
-        const availableServices = Object.keys(countryData);
-        res.json(availableServices);
+        res.json(Object.keys(countryData));
     } catch (error) { res.status(500).json({ error: "Failed to fetch services" }); }
 });
 
