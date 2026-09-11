@@ -46,7 +46,7 @@ app.get('/api/user-balance', (req, res) => {
     });
 });
 
-// DAILY BONUS ROUTE ($1 Daily)
+// DAILY LOGIN BONUS ($0.01)
 app.post('/api/claim-bonus', (req, res) => {
     const { email } = req.body;
     const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
@@ -58,10 +58,10 @@ app.post('/api/claim-bonus', (req, res) => {
             return res.status(400).json({ error: "You have already claimed your daily bonus today! Come back tomorrow." });
         }
 
-        db.run(`UPDATE users SET balance = balance + 1.0, last_bonus_date = ? WHERE email = ?`, [today, email], function(err) {
+        db.run(`UPDATE users SET balance = balance + 0.01, last_bonus_date = ? WHERE email = ?`, [today, email], function(err) {
             if (err) return res.status(500).json({ error: "Failed to claim bonus" });
             db.get(`SELECT balance FROM users WHERE email = ?`, [email], (err, updatedUser) => {
-                res.json({ success: true, balance: updatedUser.balance, message: "Successfully claimed $1 Daily Bonus!" });
+                res.json({ success: true, balance: updatedUser.balance, message: "Successfully claimed $0.01 Daily Bonus!" });
             });
         });
     });
@@ -74,7 +74,6 @@ app.get('/api/countries', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Failed" }); }
 });
 
-// Services with calculated prices for dropdown
 app.get('/api/services-with-prices', async (req, res) => {
     const { country } = req.query;
     try {
@@ -149,7 +148,6 @@ app.post('/api/buy', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Process failed" }); }
 });
 
-// Fetch user orders history from database
 app.get('/api/orders', (req, res) => {
     const { email } = req.query;
     db.all(`SELECT * FROM orders WHERE user_email = ? ORDER BY created_at DESC`, [email], (err, rows) => {
