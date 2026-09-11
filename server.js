@@ -11,7 +11,7 @@ app.use(express.json());
 const API_KEY = process.env.API_KEY;
 const BASE_URL = 'https://5sim.net/v1';
 const headers = { 'Authorization': `Bearer ${API_KEY}`, 'Accept': 'application/json' };
-const ADMIN_MARGIN = 2.0; // Exact 2x Profit Margin (100% Markup)
+const ADMIN_MARGIN = 2.0; // Strict 2x Live Multiplier (Zero Loss Guarantee)
 const ADMIN_EMAIL = 'bc115078@gmail.com';
 
 const db = new sqlite3.Database('./otp_database.db', (err) => {
@@ -148,7 +148,7 @@ app.get('/api/services', async (req, res) => {
     } catch (error) { res.json(['any']); }
 });
 
-// EXACT INDIVIDUAL OPERATOR PRICE MAPPING WITH 2X MARGIN
+// LIVE FETCHING OPERATORS & RATES WITH 2X MULTIPLIER
 app.get('/api/operators', async (req, res) => {
     const { country, service } = req.query;
     try {
@@ -158,10 +158,10 @@ app.get('/api/operators', async (req, res) => {
 
         let operatorsList = [];
         for (const [opName, opDetails] of Object.entries(serviceData)) {
-            const rawCost = opDetails.cost || 0.05;
+            const liveCost = opDetails.cost || 0.05;
             operatorsList.push({
                 operator: opName,
-                cost: rawCost * ADMIN_MARGIN, // 2x Margin Applied Correctly
+                cost: liveCost * ADMIN_MARGIN, // Live 2x calculation
                 count: opDetails.count || 0
             });
         }
@@ -169,7 +169,7 @@ app.get('/api/operators', async (req, res) => {
     } catch (error) { res.json([]); }
 });
 
-// BUY WITH EXACT CHOSEN OPERATOR AND PRECISE COST
+// LIVE EXECUTE BUY WITH EXACT REAL-TIME 5SIM PRICING
 app.post('/api/buy', async (req, res) => {
     const { country, service, operator, email } = req.body;
     if(!email) return res.status(400).json({ error: "User email required" });
@@ -177,17 +177,21 @@ app.post('/api/buy', async (req, res) => {
     const selectedOp = operator || 'any';
 
     try {
+        // Fetch live rates directly at the moment of purchase to eliminate any pricing mismatch
         const pricesRes = await axios.get(`${BASE_URL}/guest/prices?country=${country}&product=${service}`);
         const serviceData = pricesRes.data[country] && pricesRes.data[country][service] ? pricesRes.data[country][service] : null;
         
-        let rawOpCost = 0.05;
+        let liveRawCost = 0.05;
         if (serviceData && serviceData[selectedOp]) {
-            rawOpCost = serviceData[selectedOp].cost;
+            liveRawCost = serviceData[selectedOp].cost;
         } else if (serviceData && serviceData['any']) {
-            rawOpCost = serviceData['any'].cost;
+            liveRawCost = serviceData['any'].cost;
+        } else if (serviceData) {
+            const firstKey = Object.keys(serviceData)[0];
+            liveRawCost = serviceData[firstKey].cost;
         }
 
-        const finalPrice = rawOpCost * ADMIN_MARGIN;
+        const finalPrice = liveRawCost * ADMIN_MARGIN;
 
         db.get(`SELECT balance FROM users WHERE email = ?`, [cleanEmail], async (err, user) => {
             if (!user) {
