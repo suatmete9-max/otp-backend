@@ -30,16 +30,6 @@ app.post('/api/signup', (req, res) => {
     db.run(`INSERT INTO users (name, email, password, balance, last_bonus_date, ref_code, referred_by) VALUES (?, ?, ?, 0.0, '', ?, ?)`, 
     [name || 'User', email, password, myRefCode, refCode || ''], function(err) {
         if (err) return res.status(400).json({ error: "Email already registered!" });
-        
-        // If user signed up with a valid referral code, give bonus logic placeholder
-        if(refCode) {
-            db.get(`SELECT email FROM users WHERE ref_code = ?`, [refCode], (err, referrer) => {
-                if(referrer) {
-                    // Referral tracking saved
-                }
-            });
-        }
-
         res.json({ success: true, email, name: name || 'User', refCode: myRefCode, balance: 0.0 });
     });
 });
@@ -99,7 +89,6 @@ app.post('/api/deposit', (req, res) => {
     db.run(`INSERT INTO transactions (user_email, type, amount, details) VALUES (?, ?, ?, ?)`, [email, 'CRYPTO DEPOSIT', amount, `TxID: ${txId} (Pending Verification)`], function(err) {
         if(err) return res.status(500).json({ error: "Failed" });
         
-        // Check if user was referred by someone, give $5 on first deposit
         db.get(`SELECT referred_by FROM users WHERE email = ?`, [email], (err, u) => {
             if(u && u.referred_by) {
                 db.run(`UPDATE users SET balance = balance + 5.0 WHERE ref_code = ?`, [u.referred_by]);
@@ -111,10 +100,23 @@ app.post('/api/deposit', (req, res) => {
     });
 });
 
-app.get('/api/countries', async (req, res) => {
+// MULTI-SERVER CHUNKED COUNTRIES (Server 1, Server 2, Server 3 for high speed)
+app.get('/api/countries/:serverNum', async (req, res) => {
+    const serverNum = parseInt(req.params.serverNum) || 1;
     try {
         const response = await axios.get(`${BASE_URL}/guest/countries`);
-        res.json(response.data);
+        const allCountries = response.data;
+        const keys = Object.keys(allCountries);
+        const third = Math.ceil(keys.length / 3);
+        
+        let chunkKeys = [];
+        if (serverNum === 1) chunkKeys = keys.slice(0, third);
+        else if (serverNum === 2) chunkKeys = keys.slice(third, third * 2);
+        else chunkKeys = keys.slice(third * 2);
+
+        let chunkObj = {};
+        chunkKeys.forEach(k => { chunkObj[k] = allCountries[k]; });
+        res.json(chunkObj);
     } catch (error) { res.status(500).json({ error: "Failed" }); }
 });
 
