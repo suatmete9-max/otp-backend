@@ -11,23 +11,36 @@ app.use(express.json());
 const API_KEY = process.env.API_KEY;
 const BASE_URL = 'https://5sim.net/v1';
 const headers = { 'Authorization': `Bearer ${API_KEY}`, 'Accept': 'application/json' };
-const ADMIN_MARGIN = 1.5; // 50% Profit Margin (Aap ise 1.3 ya 2.0 kar sakte hain)
+const ADMIN_MARGIN = 1.5; // 50% Profit Margin
 
 const db = new sqlite3.Database('./otp_database.db', (err) => {
     if (err) console.error('Database error', err);
 });
 
 db.serialize(() => {
-    db.run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE, password TEXT, balance REAL DEFAULT 0.0, last_bonus_date TEXT, reset_token TEXT)`);
+    db.run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, email TEXT UNIQUE, password TEXT, balance REAL DEFAULT 0.0, last_bonus_date TEXT, ref_code TEXT, referred_by TEXT)`);
     db.run(`CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, user_email TEXT, service TEXT, phone TEXT, status TEXT, code TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
     db.run(`CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT, type TEXT, amount REAL, details TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
 });
 
 app.post('/api/signup', (req, res) => {
-    const { email, password } = req.body;
-    db.run(`INSERT INTO users (email, password, balance, last_bonus_date) VALUES (?, ?, 0.0, '')`, [email, password], function(err) {
+    const { name, email, password, refCode } = req.body;
+    const myRefCode = 'M' + Math.floor(100000 + Math.random() * 900000);
+    
+    db.run(`INSERT INTO users (name, email, password, balance, last_bonus_date, ref_code, referred_by) VALUES (?, ?, ?, 0.0, '', ?, ?)`, 
+    [name || 'User', email, password, myRefCode, refCode || ''], function(err) {
         if (err) return res.status(400).json({ error: "Email already registered!" });
-        res.json({ success: true, email, balance: 0.0 });
+        
+        // If user signed up with a valid referral code, give bonus logic placeholder
+        if(refCode) {
+            db.get(`SELECT email FROM users WHERE ref_code = ?`, [refCode], (err, referrer) => {
+                if(referrer) {
+                    // Referral tracking saved
+                }
+            });
+        }
+
+        res.json({ success: true, email, name: name || 'User', refCode: myRefCode, balance: 0.0 });
     });
 });
 
@@ -35,25 +48,19 @@ app.post('/api/login', (req, res) => {
     const { email, password } = req.body;
     db.get(`SELECT * FROM users WHERE email = ? AND password = ?`, [email, password], (err, row) => {
         if (err || !row) return res.status(400).json({ error: "Invalid email or password!" });
-        res.json({ success: true, email: row.email, balance: row.balance });
+        res.json({ success: true, email: row.email, name: row.name, balance: row.balance, refCode: row.ref_code });
     });
 });
 
-// FORGOT PASSWORD EMAIL LINK SIMULATION
 app.post('/api/forgot-password', (req, res) => {
     const { email, newPassword } = req.body;
     if(!email || !newPassword) return res.status(400).json({ error: "Email and new password required" });
 
     db.get(`SELECT * FROM users WHERE email = ?`, [email], (err, user) => {
-        if (err || !user) return res.status(400).json({ error: "Email not found in system!" });
-
-        const resetToken = Math.random().toString(36.substring(2, 12));
-        db.run(`UPDATE users SET password = ?, reset_token = ? WHERE email = ?`, [newPassword, resetToken, email], function(err) {
-            if (err) return res.status(500).json({ error: "Failed to process reset" });
-            res.json({ 
-                success: true, 
-                message: `Password reset link sent to ${email}. (Simulated: Password updated successfully via secure email token).` 
-            });
+        if (err || !user) return res.status(400).json({ error: "Email not found!" });
+        db.run(`UPDATE users SET password = ? WHERE email = ?`, [newPassword, email], function(err) {
+            if (err) return res.status(500).json({ error: "Failed to reset password" });
+            res.json({ success: true, message: "Password reset successfully!" });
         });
     });
 });
@@ -66,24 +73,6 @@ app.get('/api/user-balance', (req, res) => {
     });
 });
 
-app.get('/api/admin/deposits', (req, res) => {
-    db.all(`SELECT * FROM transactions WHERE type = 'CRYPTO DEPOSIT' ORDER BY created_at DESC`, [], (err, rows) => {
-        if (err) return res.status(500).json({ error: "Failed" });
-        res.json(rows);
-    });
-});
-
-app.get('/api/admin/add-balance', (req, res) => {
-    const { email, amount } = req.query;
-    if(!email || !amount) return res.status(400).json({ error: "Email and amount required" });
-
-    db.run(`UPDATE users SET balance = balance + ? WHERE email = ?`, [parseFloat(amount), email], function(err) {
-        if(err) return res.status(500).json({ error: "Failed" });
-        db.run(`INSERT INTO transactions (user_email, type, amount, details) VALUES (?, ?, ?, ?)`, [email, 'ADMIN FUND ADD', parseFloat(amount), 'Manually added by Admin']);
-        res.json({ success: true, message: `Successfully added $${amount} to ${email}` });
-    });
-});
-
 app.post('/api/claim-bonus', (req, res) => {
     const { email } = req.body;
     const today = new Date().toISOString().slice(0, 10);
@@ -91,7 +80,7 @@ app.post('/api/claim-bonus', (req, res) => {
     db.get(`SELECT last_bonus_date, balance FROM users WHERE email = ?`, [email], (err, user) => {
         if (err || !user) return res.status(400).json({ error: "User not found" });
         if (user.last_bonus_date === today) {
-            return res.status(400).json({ error: "You have already claimed your daily bonus today!" });
+            return res.status(400).json({ error: "Already claimed daily bonus today!" });
         }
 
         db.run(`UPDATE users SET balance = balance + 0.01, last_bonus_date = ? WHERE email = ?`, [today, email], function(err) {
@@ -108,7 +97,16 @@ app.post('/api/deposit', (req, res) => {
     if(!email || !amount || !txId) return res.status(400).json({ error: "All fields required" });
 
     db.run(`INSERT INTO transactions (user_email, type, amount, details) VALUES (?, ?, ?, ?)`, [email, 'CRYPTO DEPOSIT', amount, `TxID: ${txId} (Pending Verification)`], function(err) {
-        if(err) return res.status(500).json({ error: "Failed to submit deposit" });
+        if(err) return res.status(500).json({ error: "Failed" });
+        
+        // Check if user was referred by someone, give $5 on first deposit
+        db.get(`SELECT referred_by FROM users WHERE email = ?`, [email], (err, u) => {
+            if(u && u.referred_by) {
+                db.run(`UPDATE users SET balance = balance + 5.0 WHERE ref_code = ?`, [u.referred_by]);
+                db.run(`INSERT INTO transactions (user_email, type, amount, details) VALUES ((SELECT email FROM users WHERE ref_code = ?), ?, ?, ?)`, [u.referred_by, 'REFERRAL BONUS', 5.0, `Bonus from referral deposit`]);
+            }
+        });
+
         res.json({ success: true, message: "Deposit submitted successfully!" });
     });
 });
@@ -127,7 +125,7 @@ app.get('/api/services', async (req, res) => {
         const countryData = response.data[country];
         if(!countryData) return res.json([]);
         res.json(Object.keys(countryData));
-    } catch (error) { res.status(500).json({ error: "Failed to fetch services" }); }
+    } catch (error) { res.status(500).json({ error: "Failed" }); }
 });
 
 app.get('/api/price', async (req, res) => {
@@ -148,10 +146,7 @@ app.post('/api/buy', async (req, res) => {
     try {
         const pricesRes = await axios.get(`${BASE_URL}/guest/prices?country=${country}&product=${service}`);
         const priceData = pricesRes.data[country] ? pricesRes.data[country][service] : null;
-        
-        if (!priceData) {
-            return res.status(400).json({ error: "Service currently out of stock for this country." });
-        }
+        if (!priceData) return res.status(400).json({ error: "Service out of stock." });
 
         let cheapestOperator = 'any';
         let lowestPrice = Infinity;
@@ -161,18 +156,13 @@ app.post('/api/buy', async (req, res) => {
                 cheapestOperator = opName;
             }
         }
-
-        if (lowestPrice === Infinity) {
-            return res.status(400).json({ error: "No active operators with stock available." });
-        }
+        if (lowestPrice === Infinity) return res.status(400).json({ error: "No stock available." });
 
         const finalPrice = lowestPrice * ADMIN_MARGIN;
 
         db.get(`SELECT balance FROM users WHERE email = ?`, [email], async (err, user) => {
             if (err || !user) return res.status(400).json({ error: "User not found" });
-            if (user.balance < finalPrice) {
-                return res.status(400).json({ error: "Insufficient wallet balance!" });
-            }
+            if (user.balance < finalPrice) return res.status(400).json({ error: "Insufficient wallet balance!" });
 
             try {
                 const response = await axios.get(`${BASE_URL}/user/buy/activation/${country}/${cheapestOperator}/${service}`, { headers });
@@ -185,10 +175,10 @@ app.post('/api/buy', async (req, res) => {
 
                 res.json({ id: orderId, phone });
             } catch (buyErr) {
-                res.status(500).json({ error: "Number out of stock from provider." });
+                res.status(500).json({ error: "Buy failed from provider." });
             }
         });
-    } catch (error) { res.status(500).json({ error: "Process failed or out of stock." }); }
+    } catch (error) { res.status(500).json({ error: "Process failed." }); }
 });
 
 app.get('/api/history', (req, res) => {
