@@ -14,6 +14,15 @@ const headers = { 'Authorization': `Bearer ${API_KEY}`, 'Accept': 'application/j
 const ADMIN_MARGIN = 2.0; // 100% Exact 2x Markup
 const ADMIN_EMAIL = 'bc115078@gmail.com';
 
+// HIGH-PERFORMANCE IN-MEMORY CACHE FOR 1000+ USERS (ZERO HANG / INSTANT LOAD)
+let cache = {
+    countries: null,
+    countriesTime: 0,
+    prices: {}, // key: country_service, value: {data, time}
+    services: {} // key: country, value: {data, time}
+};
+const CACHE_TTL = 30 * 1000; // 30 Seconds Fresh Sync
+
 const db = new sqlite3.Database('./otp_database.db', (err) => {
     if (err) console.error('Database error', err);
 });
@@ -129,28 +138,55 @@ app.post('/api/deposit', (req, res) => {
     });
 });
 
+// CACHED COUNTRIES (INSTANT LOAD FOR 1000+ USERS)
 app.get('/api/countries', async (req, res) => {
+    const now = Date.now();
+    if (cache.countries && (now - cache.countriesTime < CACHE_TTL)) {
+        return res.json(cache.countries);
+    }
     try {
         const response = await axios.get(`${BASE_URL}/guest/countries`);
+        cache.countries = response.data;
+        cache.countriesTime = now;
         res.json(response.data);
-    } catch (error) { res.status(500).json({ error: "Failed" }); }
+    } catch (error) { 
+        if (cache.countries) return res.json(cache.countries);
+        res.status(500).json({ error: "Failed" }); 
+    }
 });
 
+// CACHED SERVICES PER COUNTRY (ZERO HANG)
 app.get('/api/services', async (req, res) => {
     const { country } = req.query;
+    const now = Date.now();
+    if (cache.services[country] && (now - cache.services[country].time < CACHE_TTL)) {
+        return res.json(cache.services[country].data);
+    }
     try {
         const response = await axios.get(`${BASE_URL}/guest/prices?country=${country}`);
         const countryData = response.data[country];
         if(!countryData) return res.json(['any']);
         let allKeys = Object.keys(countryData);
         if (!allKeys.includes('any')) allKeys.push('any');
+        
+        cache.services[country] = { data: allKeys, time: now };
         res.json(allKeys);
-    } catch (error) { res.json(['any']); }
+    } catch (error) { 
+        if (cache.services[country]) return res.json(cache.services[country].data);
+        res.json(['any']); 
+    }
 });
 
-// DIRECT 5SIM LIVE OPERATORS & PRICING MIRROR WITH 2X
+// CACHED LIVE OPERATORS & PRICING (LIGHTNING FAST)
 app.get('/api/operators', async (req, res) => {
     const { country, service } = req.query;
+    const cacheKey = `${country}_${service}`;
+    const now = Date.now();
+    
+    if (cache.prices[cacheKey] && (now - cache.prices[cacheKey].time < CACHE_TTL)) {
+        return res.json(cache.prices[cacheKey].data);
+    }
+
     try {
         const response = await axios.get(`${BASE_URL}/guest/prices?country=${country}&product=${service}`);
         const serviceData = response.data[country] && response.data[country][service] ? response.data[country][service] : null;
@@ -161,15 +197,20 @@ app.get('/api/operators', async (req, res) => {
             const liveRealCost = opDetails.cost || 0.05;
             operatorsList.push({
                 operator: opName,
-                cost: liveRealCost * ADMIN_MARGIN, // Exact 2x live multiplication
+                cost: liveRealCost * ADMIN_MARGIN, // 2x Markup
                 count: opDetails.count || 0
             });
         }
+
+        cache.prices[cacheKey] = { data: operatorsList, time: now };
         res.json(operatorsList);
-    } catch (error) { res.json([]); }
+    } catch (error) { 
+        if (cache.prices[cacheKey]) return res.json(cache.prices[cacheKey].data);
+        res.json([]); 
+    }
 });
 
-// LIVE PURCHASE WITH EXACT 5SIM PRICING VERIFICATION
+// INSTANT LIVE PURCHASE WITH EXACT 5SIM PRICING VERIFICATION
 app.post('/api/buy', async (req, res) => {
     const { country, service, operator, email } = req.body;
     if(!email) return res.status(400).json({ error: "User email required" });
@@ -177,7 +218,6 @@ app.post('/api/buy', async (req, res) => {
     const selectedOp = operator || 'any';
 
     try {
-        // Fetch absolute live rates from 5sim right at the moment of order placement
         const pricesRes = await axios.get(`${BASE_URL}/guest/prices?country=${country}&product=${service}`);
         const serviceData = pricesRes.data[country] && pricesRes.data[country][service] ? pricesRes.data[country][service] : null;
         
