@@ -12,6 +12,7 @@ const API_KEY = process.env.API_KEY;
 const BASE_URL = 'https://5sim.net/v1';
 const headers = { 'Authorization': `Bearer ${API_KEY}`, 'Accept': 'application/json' };
 const ADMIN_MARGIN = 1.5; // 50% Profit Margin
+const ADMIN_EMAIL = 'bc115078@gmail.com';
 
 const db = new sqlite3.Database('./otp_database.db', (err) => {
     if (err) console.error('Database error', err);
@@ -26,11 +27,12 @@ db.serialize(() => {
 app.post('/api/signup', (req, res) => {
     const { name, email, password, refCode } = req.body;
     const myRefCode = 'M' + Math.floor(100000 + Math.random() * 900000);
+    const isAdmin = (email.toLowerCase() === ADMIN_EMAIL.toLowerCase()) ? 1 : 0;
     
-    db.run(`INSERT INTO users (name, email, password, balance, last_bonus_date, ref_code, referred_by) VALUES (?, ?, ?, 0.0, '', ?, ?)`, 
-    [name || 'User', email, password, myRefCode, refCode || ''], function(err) {
+    db.run(`INSERT INTO users (name, email, password, balance, last_bonus_date, ref_code, referred_by, is_admin) VALUES (?, ?, ?, 0.0, '', ?, ?, ?)`, 
+    [name || 'User', email, password, myRefCode, refCode || '', isAdmin], function(err) {
         if (err) return res.status(400).json({ error: "Email already registered!" });
-        res.json({ success: true, email, name: name || 'User', refCode: myRefCode, balance: 0.0 });
+        res.json({ success: true, email, name: name || 'User', refCode: myRefCode, balance: 0.0, isAdmin });
     });
 });
 
@@ -38,7 +40,8 @@ app.post('/api/login', (req, res) => {
     const { email, password } = req.body;
     db.get(`SELECT * FROM users WHERE email = ? AND password = ?`, [email, password], (err, row) => {
         if (err || !row) return res.status(400).json({ error: "Invalid email or password!" });
-        res.json({ success: true, email: row.email, name: row.name, balance: row.balance, refCode: row.ref_code, isAdmin: row.is_admin });
+        const isAdmin = (row.email.toLowerCase() === ADMIN_EMAIL.toLowerCase() || row.is_admin === 1) ? 1 : 0;
+        res.json({ success: true, email: row.email, name: row.name, balance: row.balance, refCode: row.ref_code, isAdmin });
     });
 });
 
