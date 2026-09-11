@@ -20,7 +20,6 @@ const db = new sqlite3.Database('./otp_database.db', (err) => {
 db.serialize(() => {
     db.run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE, password TEXT, balance REAL DEFAULT 0.0, last_bonus_date TEXT)`);
     db.run(`CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, user_email TEXT, service TEXT, phone TEXT, status TEXT, code TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
-    // Transactions table for deposits & bonuses
     db.run(`CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT, type TEXT, amount REAL, details TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
 });
 
@@ -48,24 +47,38 @@ app.get('/api/user-balance', (req, res) => {
     });
 });
 
-// DAILY LOGIN BONUS ($0.01) + Log in transactions
+// ADMIN: View all deposits
+app.get('/api/admin/deposits', (req, res) => {
+    db.all(`SELECT * FROM transactions WHERE type = 'CRYPTO DEPOSIT' ORDER BY created_at DESC`, [], (err, rows) => {
+        if (err) return res.status(500).json({ error: "Failed to fetch deposits" });
+        res.json(rows);
+    });
+});
+
+// ADMIN: Add balance directly to user
+app.get('/api/admin/add-balance', (req, res) => {
+    const { email, amount } = req.query;
+    if(!email || !amount) return res.status(400).json({ error: "Email and amount required" });
+
+    db.run(`UPDATE users SET balance = balance + ? WHERE email = ?`, [parseFloat(amount), email], function(err) {
+        if(err) return res.status(500).json({ error: "Failed to update balance" });
+        db.run(`INSERT INTO transactions (user_email, type, amount, details) VALUES (?, ?, ?, ?)`, [email, 'ADMIN FUND ADD', parseFloat(amount), 'Manually added by Admin']);
+        res.json({ success: true, message: `Successfully added $${amount} to ${email}` });
+    });
+});
+
 app.post('/api/claim-bonus', (req, res) => {
     const { email } = req.body;
     const today = new Date().toISOString().slice(0, 10);
 
     db.get(`SELECT last_bonus_date, balance FROM users WHERE email = ?`, [email], (err, user) => {
         if (err || !user) return res.status(400).json({ error: "User not found" });
-
         if (user.last_bonus_date === today) {
-            return res.status(400).json({ error: "You have already claimed your daily bonus today! Come back tomorrow." });
+            return res.status(400).json({ error: "You have already claimed your daily bonus today!" });
         }
 
         db.run(`UPDATE users SET balance = balance + 0.01, last_bonus_date = ? WHERE email = ?`, [today, email], function(err) {
-            if (err) return res.status(500).json({ error: "Failed to claim bonus" });
-            
-            // Log transaction
             db.run(`INSERT INTO transactions (user_email, type, amount, details) VALUES (?, ?, ?, ?)`, [email, 'DAILY BONUS', 0.01, 'Claimed Daily Login Bonus']);
-
             db.get(`SELECT balance FROM users WHERE email = ?`, [email], (err, updatedUser) => {
                 res.json({ success: true, balance: updatedUser.balance, message: "Successfully claimed $0.01 Daily Bonus!" });
             });
@@ -73,7 +86,6 @@ app.post('/api/claim-bonus', (req, res) => {
     });
 });
 
-// SUBMIT CRYPTO DEPOSIT
 app.post('/api/deposit', (req, res) => {
     const { email, amount, txId } = req.body;
     if(!email || !amount || !txId) return res.status(400).json({ error: "All fields required" });
@@ -133,7 +145,7 @@ app.post('/api/buy', async (req, res) => {
         db.get(`SELECT balance FROM users WHERE email = ?`, [email], async (err, user) => {
             if (err || !user) return res.status(400).json({ error: "User not found" });
             if (user.balance < finalPrice) {
-                return res.status(400).json({ error: "Insufficient wallet balance! Please add funds." });
+                return res.status(400).json({ error: "Insufficient wallet balance!" });
             }
 
             try {
@@ -147,20 +159,19 @@ app.post('/api/buy', async (req, res) => {
 
                 res.json({ id: orderId, phone });
             } catch (buyErr) {
-                res.status(500).json({ error: "Number out of stock or buy failed" });
+                res.status(500).json({ error: "Number out of stock" });
             }
         });
     } catch (error) { res.status(500).json({ error: "Process failed" }); }
 });
 
-// COMBINED HISTORY (Orders + Transactions)
 app.get('/api/history', (req, res) => {
     const { email } = req.query;
     db.all(`SELECT type as category, amount as cost, details as info, created_at FROM transactions WHERE user_email = ? 
             UNION ALL 
             SELECT 'NUMBER ORDER' as category, 0 as cost, 'Service: ' || service || ' | Phone: ' || phone || ' | Status: ' || status as info, created_at FROM orders WHERE user_email = ? 
             ORDER BY created_at DESC`, [email, email], (err, rows) => {
-        if (err) return res.status(500).json({ error: "Failed to fetch history" });
+        if (err) return res.status(500).json({ error: "Failed" });
         res.json(rows);
     });
 });
