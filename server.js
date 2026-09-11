@@ -11,15 +11,15 @@ app.use(express.json());
 const API_KEY = process.env.API_KEY;
 const BASE_URL = 'https://5sim.net/v1';
 const headers = { 'Authorization': `Bearer ${API_KEY}`, 'Accept': 'application/json' };
-const ADMIN_MARGIN = 2.0; // 100% Exact 2x Markup
+const ADMIN_MARGIN = 2.0; // 2x Profit Margin (100% Markup)
 const ADMIN_EMAIL = 'bc115078@gmail.com';
 
-// HIGH-PERFORMANCE IN-MEMORY CACHE FOR 1000+ USERS (ZERO HANG / INSTANT LOAD)
+// PERFORMANCE CACHE TO PREVENT HANGING FOR 1000+ USERS
 let cache = {
     countries: null,
     countriesTime: 0,
-    prices: {}, // key: country_service, value: {data, time}
-    services: {} // key: country, value: {data, time}
+    services: {},
+    prices: {}
 };
 const CACHE_TTL = 30 * 1000; // 30 Seconds Fresh Sync
 
@@ -138,7 +138,6 @@ app.post('/api/deposit', (req, res) => {
     });
 });
 
-// CACHED COUNTRIES (INSTANT LOAD FOR 1000+ USERS)
 app.get('/api/countries', async (req, res) => {
     const now = Date.now();
     if (cache.countries && (now - cache.countriesTime < CACHE_TTL)) {
@@ -155,7 +154,6 @@ app.get('/api/countries', async (req, res) => {
     }
 });
 
-// CACHED SERVICES PER COUNTRY (ZERO HANG)
 app.get('/api/services', async (req, res) => {
     const { country } = req.query;
     const now = Date.now();
@@ -177,12 +175,12 @@ app.get('/api/services', async (req, res) => {
     }
 });
 
-// CACHED LIVE OPERATORS & PRICING (LIGHTNING FAST)
+// ORIGINAL ROBUST OPERATORS & PRICING FORMAT WITH CACHING
 app.get('/api/operators', async (req, res) => {
     const { country, service } = req.query;
     const cacheKey = `${country}_${service}`;
     const now = Date.now();
-    
+
     if (cache.prices[cacheKey] && (now - cache.prices[cacheKey].time < CACHE_TTL)) {
         return res.json(cache.prices[cacheKey].data);
     }
@@ -194,10 +192,10 @@ app.get('/api/operators', async (req, res) => {
 
         let operatorsList = [];
         for (const [opName, opDetails] of Object.entries(serviceData)) {
-            const liveRealCost = opDetails.cost || 0.05;
+            const rawCost = opDetails.cost || 0.05;
             operatorsList.push({
                 operator: opName,
-                cost: liveRealCost * ADMIN_MARGIN, // 2x Markup
+                cost: rawCost * ADMIN_MARGIN, // Exact 2x Profit Margin
                 count: opDetails.count || 0
             });
         }
@@ -210,7 +208,7 @@ app.get('/api/operators', async (req, res) => {
     }
 });
 
-// INSTANT LIVE PURCHASE WITH EXACT 5SIM PRICING VERIFICATION
+// BULLET-PROOF BUY WITH 2X MARGIN
 app.post('/api/buy', async (req, res) => {
     const { country, service, operator, email } = req.body;
     if(!email) return res.status(400).json({ error: "User email required" });
@@ -221,17 +219,17 @@ app.post('/api/buy', async (req, res) => {
         const pricesRes = await axios.get(`${BASE_URL}/guest/prices?country=${country}&product=${service}`);
         const serviceData = pricesRes.data[country] && pricesRes.data[country][service] ? pricesRes.data[country][service] : null;
         
-        let exactLiveCost = 0.05;
+        let opCost = 0.05;
         if (serviceData && serviceData[selectedOp]) {
-            exactLiveCost = serviceData[selectedOp].cost;
+            opCost = serviceData[selectedOp].cost;
         } else if (serviceData && serviceData['any']) {
-            exactLiveCost = serviceData['any'].cost;
+            opCost = serviceData['any'].cost;
         } else if (serviceData) {
             const firstKey = Object.keys(serviceData)[0];
-            exactLiveCost = serviceData[firstKey].cost;
+            opCost = serviceData[firstKey].cost;
         }
 
-        const finalDeductionPrice = exactLiveCost * ADMIN_MARGIN;
+        const finalPrice = opCost * ADMIN_MARGIN;
 
         db.get(`SELECT balance FROM users WHERE email = ?`, [cleanEmail], async (err, user) => {
             if (!user) {
@@ -239,16 +237,16 @@ app.post('/api/buy', async (req, res) => {
             }
             
             const currentBal = user ? user.balance : 10.0;
-            if (currentBal < finalDeductionPrice) return res.status(400).json({ error: "Insufficient wallet balance!" });
+            if (currentBal < finalPrice) return res.status(400).json({ error: "Insufficient wallet balance!" });
 
             try {
                 const response = await axios.get(`${BASE_URL}/user/buy/activation/${country}/${selectedOp}/${service}`, { headers });
                 const orderId = response.data.id.toString();
                 const phone = response.data.phone;
 
-                db.run(`UPDATE users SET balance = MAX(0, balance - ?) WHERE email = ?`, [finalDeductionPrice, cleanEmail]);
+                db.run(`UPDATE users SET balance = MAX(0, balance - ?) WHERE email = ?`, [finalPrice, cleanEmail]);
                 db.run(`INSERT INTO orders (id, user_email, service, phone, status, code) VALUES (?, ?, ?, ?, ?, ?)`, [orderId, cleanEmail, service, phone, 'WAITING', '-']);
-                db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [cleanEmail, 'NUMBER PURCHASE', finalDeductionPrice, `Service: ${service} (${phone}) [Op: ${selectedOp}]`, 'APPROVED']);
+                db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [cleanEmail, 'NUMBER PURCHASE', finalPrice, `Service: ${service} (${phone}) [Op: ${selectedOp}]`, 'APPROVED']);
 
                 res.json({ id: orderId, phone });
             } catch (buyErr) {
@@ -257,9 +255,9 @@ app.post('/api/buy', async (req, res) => {
                     const orderId = fallbackRes.data.id.toString();
                     const phone = fallbackRes.data.phone;
 
-                    db.run(`UPDATE users SET balance = MAX(0, balance - ?) WHERE email = ?`, [finalDeductionPrice, cleanEmail]);
+                    db.run(`UPDATE users SET balance = MAX(0, balance - ?) WHERE email = ?`, [finalPrice, cleanEmail]);
                     db.run(`INSERT INTO orders (id, user_email, service, phone, status, code) VALUES (?, ?, ?, ?, ?, ?)`, [orderId, cleanEmail, service, phone, 'WAITING', '-']);
-                    db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [cleanEmail, 'NUMBER PURCHASE', finalDeductionPrice, `Service: ${service} (${phone}) [Op: any]`, 'APPROVED']);
+                    db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [cleanEmail, 'NUMBER PURCHASE', finalPrice, `Service: ${service} (${phone}) [Op: any]`, 'APPROVED']);
 
                     res.json({ id: orderId, phone });
                 } catch (fbErr) {
