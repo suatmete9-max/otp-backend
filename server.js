@@ -11,7 +11,7 @@ app.use(express.json());
 const API_KEY = process.env.API_KEY;
 const BASE_URL = 'https://5sim.net/v1';
 const headers = { 'Authorization': `Bearer ${API_KEY}`, 'Accept': 'application/json' };
-const ADMIN_MARGIN = 2.0; // 2x Profit Margin (100% markup)
+const ADMIN_MARGIN = 2.0; // 2x Profit Margin
 const ADMIN_EMAIL = 'bc115078@gmail.com';
 
 const db = new sqlite3.Database('./otp_database.db', (err) => {
@@ -26,19 +26,24 @@ db.serialize(() => {
 
 app.post('/api/signup', (req, res) => {
     const { name, email, password, refCode } = req.body;
+    if(!email || !password) return res.status(400).json({ error: "Email and password required" });
     const myRefCode = 'M' + Math.floor(100000 + Math.random() * 900000);
-    const isAdmin = (email.toLowerCase() === ADMIN_EMAIL.toLowerCase()) ? 1 : 0;
+    const cleanEmail = email.trim().toLowerCase();
+    const isAdmin = (cleanEmail === ADMIN_EMAIL.toLowerCase()) ? 1 : 0;
     
     db.run(`INSERT INTO users (name, email, password, balance, last_bonus_date, ref_code, referred_by, is_admin) VALUES (?, ?, ?, 0.0, '', ?, ?, ?)`, 
-    [name || 'User', email, password, myRefCode, refCode || '', isAdmin], function(err) {
+    [name || 'User', cleanEmail, password, myRefCode, refCode ? refCode.trim() : '', isAdmin], function(err) {
         if (err) return res.status(400).json({ error: "Email already registered!" });
-        res.json({ success: true, email, name: name || 'User', refCode: myRefCode, balance: 0.0, isAdmin });
+        res.json({ success: true, email: cleanEmail, name: name || 'User', refCode: myRefCode, balance: 0.0, isAdmin });
     });
 });
 
 app.post('/api/login', (req, res) => {
     const { email, password } = req.body;
-    db.get(`SELECT * FROM users WHERE email = ? AND password = ?`, [email, password], (err, row) => {
+    if(!email || !password) return res.status(400).json({ error: "Email and password required" });
+    const cleanEmail = email.trim().toLowerCase();
+
+    db.get(`SELECT * FROM users WHERE email = ? AND password = ?`, [cleanEmail, password], (err, row) => {
         if (err || !row) return res.status(400).json({ error: "Invalid email or password!" });
         const isAdmin = (row.email.toLowerCase() === ADMIN_EMAIL.toLowerCase() || row.is_admin === 1) ? 1 : 0;
         res.json({ success: true, email: row.email, name: row.name, balance: row.balance, refCode: row.ref_code, isAdmin });
@@ -48,10 +53,11 @@ app.post('/api/login', (req, res) => {
 app.post('/api/forgot-password', (req, res) => {
     const { email, newPassword } = req.body;
     if(!email || !newPassword) return res.status(400).json({ error: "Email and new password required" });
+    const cleanEmail = email.trim().toLowerCase();
 
-    db.get(`SELECT * FROM users WHERE email = ?`, [email], (err, user) => {
+    db.get(`SELECT * FROM users WHERE email = ?`, [cleanEmail], (err, user) => {
         if (err || !user) return res.status(400).json({ error: "Email not found!" });
-        db.run(`UPDATE users SET password = ? WHERE email = ?`, [newPassword, email], function(err) {
+        db.run(`UPDATE users SET password = ? WHERE email = ?`, [newPassword, cleanEmail], function(err) {
             if (err) return res.status(500).json({ error: "Failed to reset password" });
             res.json({ success: true, message: "Password reset successfully!" });
         });
@@ -59,7 +65,7 @@ app.post('/api/forgot-password', (req, res) => {
 });
 
 app.get('/api/user-balance', (req, res) => {
-    const { email } = req.query;
+    const email = req.query.email ? req.query.email.trim().toLowerCase() : '';
     db.get(`SELECT balance FROM users WHERE email = ?`, [email], (err, row) => {
         if (err || !row) return res.status(404).json({ error: "User not found" });
         res.json({ balance: row.balance });
@@ -75,14 +81,15 @@ app.get('/api/admin/deposits', (req, res) => {
 
 app.post('/api/admin/approve-deposit', (req, res) => {
     const { depositId, email, amount } = req.body;
+    const cleanEmail = email.trim().toLowerCase();
     db.run(`UPDATE transactions SET status = 'APPROVED' WHERE id = ?`, [depositId], function(err) {
         if (err) return res.status(500).json({ error: "Failed to update deposit status" });
 
-        db.run(`UPDATE users SET balance = balance + ? WHERE email = ?`, [parseFloat(amount), email], function(err) {
+        db.run(`UPDATE users SET balance = balance + ? WHERE email = ?`, [parseFloat(amount), cleanEmail], function(err) {
             if (err) return res.status(500).json({ error: "Failed to add balance" });
             db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, 
-            [email, 'ADMIN FUND ADD', parseFloat(amount), 'Deposit Approved & Credited', 'APPROVED']);
-            res.json({ success: true, message: `Successfully approved $${amount} for ${email}` });
+            [cleanEmail, 'ADMIN FUND ADD', parseFloat(amount), 'Deposit Approved & Credited', 'APPROVED']);
+            res.json({ success: true, message: `Successfully approved $${amount} for ${cleanEmail}` });
         });
     });
 });
@@ -90,19 +97,23 @@ app.post('/api/admin/approve-deposit', (req, res) => {
 app.post('/api/apply-referral', (req, res) => {
     const { email, refCode } = req.body;
     if(!email || !refCode) return res.status(400).json({ error: "Email and code required" });
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanCode = refCode.trim();
 
-    db.get(`SELECT * FROM users WHERE email = ?`, [email], (err, user) => {
+    db.get(`SELECT * FROM users WHERE email = ?`, [cleanEmail], (err, user) => {
         if(err || !user) return res.status(400).json({ error: "User not found" });
         if(user.referred_by) return res.status(400).json({ error: "Already applied a referral code!" });
-        if(user.ref_code === refCode) return res.status(400).json({ error: "Cannot use your own code!" });
+        if(user.ref_code === cleanCode) return res.status(400).json({ error: "Cannot use your own code!" });
 
-        db.get(`SELECT * FROM users WHERE ref_code = ?`, [refCode], (err, referrer) => {
+        db.get(`SELECT * FROM users WHERE ref_code = ?`, [cleanCode], (err, referrer) => {
             if(err || !referrer) return res.status(400).json({ error: "Invalid referral code!" });
 
-            db.run(`UPDATE users SET referred_by = ?, balance = balance + 0.05 WHERE email = ?`, [refCode, email], function(err) {
-                db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [email, 'REFERRAL BONUS', 0.05, `Bonus from code ${refCode}`, 'APPROVED']);
-                db.get(`SELECT balance FROM users WHERE email = ?`, [email], (err, updatedUser) => {
-                    res.json({ success: true, balance: updatedUser.balance, message: "Referral code applied! $0.05 added." });
+            db.run(`UPDATE users SET referred_by = ?, balance = balance + 0.05 WHERE email = ?`, [cleanCode, cleanEmail], function(err) {
+                if(err) return res.status(500).json({ error: "Failed to apply referral code" });
+                db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [cleanEmail, 'REFERRAL BONUS', 0.05, `Bonus from code ${cleanCode}`, 'APPROVED']);
+                
+                db.get(`SELECT balance FROM users WHERE email = ?`, [cleanEmail], (err, updatedUser) => {
+                    res.json({ success: true, balance: updatedUser.balance, message: "Referral code applied successfully! $0.05 added." });
                 });
             });
         });
@@ -110,7 +121,7 @@ app.post('/api/apply-referral', (req, res) => {
 });
 
 app.post('/api/claim-bonus', (req, res) => {
-    const { email } = req.body;
+    const email = req.body.email ? req.body.email.trim().toLowerCase() : '';
     const today = new Date().toISOString().slice(0, 10);
 
     db.get(`SELECT last_bonus_date, balance FROM users WHERE email = ?`, [email], (err, user) => {
@@ -131,8 +142,9 @@ app.post('/api/claim-bonus', (req, res) => {
 app.post('/api/deposit', (req, res) => {
     const { email, amount, txId } = req.body;
     if(!email || !amount || !txId) return res.status(400).json({ error: "All fields required" });
+    const cleanEmail = email.trim().toLowerCase();
 
-    db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [email, 'CRYPTO DEPOSIT', amount, `TxID: ${txId}`, 'PENDING'], function(err) {
+    db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [cleanEmail, 'CRYPTO DEPOSIT', amount, `TxID: ${txId}`, 'PENDING'], function(err) {
         if(err) return res.status(500).json({ error: "Failed" });
         res.json({ success: true, message: "Deposit submitted successfully!" });
     });
@@ -145,7 +157,7 @@ app.get('/api/countries', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Failed" }); }
 });
 
-// FAMOUS SERVICES ONLY + "any" (Any Other) ALWAYS INCLUDED FOR SPEED & STABILITY
+// ALL AVAILABLE SERVICES + "any" (Any Other) ALWAYS INCLUDED
 app.get('/api/services', async (req, res) => {
     const { country } = req.query;
     try {
@@ -153,13 +165,9 @@ app.get('/api/services', async (req, res) => {
         const countryData = response.data[country];
         if(!countryData) return res.json(['any']);
 
-        const allKeys = Object.keys(countryData);
-        const famousList = ['telegram', 'whatsapp', 'google', 'instagram', 'facebook', 'twitter', 'netflix', 'amazon', 'discord', 'tinder', 'microsoft', 'yahoo', 'apple', 'uber', 'openai', 'tiktok', 'snapchat', 'paypal', 'spotify', 'steam', 'any'];
-        
-        let filtered = allKeys.filter(s => famousList.includes(s.toLowerCase()));
-        if (!filtered.includes('any')) filtered.push('any');
-
-        res.json(filtered);
+        let allKeys = Object.keys(countryData);
+        if (!allKeys.includes('any')) allKeys.push('any');
+        res.json(allKeys);
     } catch (error) { res.json(['any']); }
 });
 
@@ -180,6 +188,9 @@ app.get('/api/price', async (req, res) => {
 
 app.post('/api/buy', async (req, res) => {
     const { country, service, email } = req.body;
+    if(!email) return res.status(400).json({ error: "User email required" });
+    const cleanEmail = email.trim().toLowerCase();
+
     try {
         const pricesRes = await axios.get(`${BASE_URL}/guest/prices?country=${country}&product=${service}`);
         const priceData = pricesRes.data[country] ? pricesRes.data[country][service] : null;
@@ -200,8 +211,8 @@ app.post('/api/buy', async (req, res) => {
 
         const finalPrice = lowestPrice * ADMIN_MARGIN;
 
-        db.get(`SELECT balance FROM users WHERE email = ?`, [email], async (err, user) => {
-            if (err || !user) return res.status(400).json({ error: "User not found" });
+        db.get(`SELECT balance FROM users WHERE email = ?`, [cleanEmail], async (err, user) => {
+            if (err || !user) return res.status(400).json({ error: "User not found in database!" });
             if (user.balance < finalPrice) return res.status(400).json({ error: "Insufficient wallet balance!" });
 
             try {
@@ -209,9 +220,9 @@ app.post('/api/buy', async (req, res) => {
                 const orderId = response.data.id.toString();
                 const phone = response.data.phone;
 
-                db.run(`UPDATE users SET balance = balance - ? WHERE email = ?`, [finalPrice, email]);
-                db.run(`INSERT INTO orders (id, user_email, service, phone, status, code) VALUES (?, ?, ?, ?, ?, ?)`, [orderId, email, service, phone, 'WAITING', '-']);
-                db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [email, 'NUMBER PURCHASE', finalPrice, `Service: ${service} (${phone})`, 'APPROVED']);
+                db.run(`UPDATE users SET balance = balance - ? WHERE email = ?`, [finalPrice, cleanEmail]);
+                db.run(`INSERT INTO orders (id, user_email, service, phone, status, code) VALUES (?, ?, ?, ?, ?, ?)`, [orderId, cleanEmail, service, phone, 'WAITING', '-']);
+                db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [cleanEmail, 'NUMBER PURCHASE', finalPrice, `Service: ${service} (${phone})`, 'APPROVED']);
 
                 res.json({ id: orderId, phone });
             } catch (buyErr) {
@@ -220,9 +231,9 @@ app.post('/api/buy', async (req, res) => {
                     const orderId = fallbackRes.data.id.toString();
                     const phone = fallbackRes.data.phone;
 
-                    db.run(`UPDATE users SET balance = balance - ? WHERE email = ?`, [finalPrice, email]);
-                    db.run(`INSERT INTO orders (id, user_email, service, phone, status, code) VALUES (?, ?, ?, ?, ?, ?)`, [orderId, email, service, phone, 'WAITING', '-']);
-                    db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [email, 'NUMBER PURCHASE', finalPrice, `Service: ${service} (${phone})`, 'APPROVED']);
+                    db.run(`UPDATE users SET balance = balance - ? WHERE email = ?`, [finalPrice, cleanEmail]);
+                    db.run(`INSERT INTO orders (id, user_email, service, phone, status, code) VALUES (?, ?, ?, ?, ?, ?)`, [orderId, cleanEmail, service, phone, 'WAITING', '-']);
+                    db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [cleanEmail, 'NUMBER PURCHASE', finalPrice, `Service: ${service} (${phone})`, 'APPROVED']);
 
                     res.json({ id: orderId, phone });
                 } catch (fbErr) {
@@ -234,7 +245,7 @@ app.post('/api/buy', async (req, res) => {
 });
 
 app.get('/api/history', (req, res) => {
-    const { email } = req.query;
+    const email = req.query.email ? req.query.email.trim().toLowerCase() : '';
     db.all(`SELECT type as category, amount as cost, details as info, status, created_at FROM transactions WHERE user_email = ? 
             UNION ALL 
             SELECT 'NUMBER ORDER' as category, 0 as cost, 'Service: ' || service || ' | Phone: ' || phone || ' | Status: ' || status as info, status, created_at FROM orders WHERE user_email = ? 
