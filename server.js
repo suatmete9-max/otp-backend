@@ -11,7 +11,7 @@ app.use(express.json());
 const API_KEY = process.env.API_KEY;
 const BASE_URL = 'https://5sim.net/v1';
 const headers = { 'Authorization': `Bearer ${API_KEY}`, 'Accept': 'application/json' };
-const ADMIN_MARGIN = 2.0; // 2x Profit Margin
+const ADMIN_MARGIN = 2.0; // Exact 2x Profit Margin (100% Markup)
 const ADMIN_EMAIL = 'bc115078@gmail.com';
 
 const db = new sqlite3.Database('./otp_database.db', (err) => {
@@ -148,27 +148,28 @@ app.get('/api/services', async (req, res) => {
     } catch (error) { res.json(['any']); }
 });
 
-// GET OPERATORS & PRICES FOR SELECTED COUNTRY + SERVICE
+// EXACT INDIVIDUAL OPERATOR PRICE MAPPING WITH 2X MARGIN
 app.get('/api/operators', async (req, res) => {
     const { country, service } = req.query;
     try {
         const response = await axios.get(`${BASE_URL}/guest/prices?country=${country}&product=${service}`);
-        const priceData = response.data[country] ? response.data[country][service] : null;
-        if(!priceData) return res.json([]);
+        const serviceData = response.data[country] && response.data[country][service] ? response.data[country][service] : null;
+        if(!serviceData) return res.json([]);
 
         let operatorsList = [];
-        for (const [opName, opDetails] of Object.entries(priceData)) {
+        for (const [opName, opDetails] of Object.entries(serviceData)) {
+            const rawCost = opDetails.cost || 0.05;
             operatorsList.push({
                 operator: opName,
-                cost: opDetails.cost * ADMIN_MARGIN,
-                count: opDetails.count
+                cost: rawCost * ADMIN_MARGIN, // 2x Margin Applied Correctly
+                count: opDetails.count || 0
             });
         }
         res.json(operatorsList);
     } catch (error) { res.json([]); }
 });
 
-// BUY WITH SPECIFIC OPERATOR
+// BUY WITH EXACT CHOSEN OPERATOR AND PRECISE COST
 app.post('/api/buy', async (req, res) => {
     const { country, service, operator, email } = req.body;
     if(!email) return res.status(400).json({ error: "User email required" });
@@ -177,16 +178,16 @@ app.post('/api/buy', async (req, res) => {
 
     try {
         const pricesRes = await axios.get(`${BASE_URL}/guest/prices?country=${country}&product=${service}`);
-        const priceData = pricesRes.data[country] ? pricesRes.data[country][service] : null;
+        const serviceData = pricesRes.data[country] && pricesRes.data[country][service] ? pricesRes.data[country][service] : null;
         
-        let opCost = 0.05;
-        if (priceData && priceData[selectedOp]) {
-            opCost = priceData[selectedOp].cost;
-        } else if (priceData && priceData['any']) {
-            opCost = priceData['any'].cost;
+        let rawOpCost = 0.05;
+        if (serviceData && serviceData[selectedOp]) {
+            rawOpCost = serviceData[selectedOp].cost;
+        } else if (serviceData && serviceData['any']) {
+            rawOpCost = serviceData['any'].cost;
         }
 
-        const finalPrice = opCost * ADMIN_MARGIN;
+        const finalPrice = rawOpCost * ADMIN_MARGIN;
 
         db.get(`SELECT balance FROM users WHERE email = ?`, [cleanEmail], async (err, user) => {
             if (!user) {
