@@ -18,13 +18,13 @@ const db = new sqlite3.Database('./otp_database.db', (err) => {
 });
 
 db.serialize(() => {
-    db.run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE, password TEXT, balance REAL DEFAULT 0.0)`);
-    db.run(`CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, user_email TEXT, service TEXT, phone TEXT, status TEXT, code TEXT)`);
+    db.run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE, password TEXT, balance REAL DEFAULT 0.0, last_bonus_date TEXT)`);
+    db.run(`CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, user_email TEXT, service TEXT, phone TEXT, status TEXT, code TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
 });
 
 app.post('/api/signup', (req, res) => {
     const { email, password } = req.body;
-    db.run(`INSERT INTO users (email, password, balance) VALUES (?, ?, 0.0)`, [email, password], function(err) {
+    db.run(`INSERT INTO users (email, password, balance, last_bonus_date) VALUES (?, ?, 0.0, '')`, [email, password], function(err) {
         if (err) return res.status(400).json({ error: "Email already registered!" });
         res.json({ success: true, email, balance: 0.0 });
     });
@@ -38,7 +38,6 @@ app.post('/api/login', (req, res) => {
     });
 });
 
-// Get User's Personal Wallet Balance
 app.get('/api/user-balance', (req, res) => {
     const { email } = req.query;
     db.get(`SELECT balance FROM users WHERE email = ?`, [email], (err, row) => {
@@ -47,13 +46,23 @@ app.get('/api/user-balance', (req, res) => {
     });
 });
 
-// Add Funds to User's Wallet
-app.post('/api/add-funds', (req, res) => {
-    const { email, amount } = req.body;
-    db.run(`UPDATE users SET balance = balance + ? WHERE email = ?`, [amount, email], function(err) {
-        if (err) return res.status(400).json({ error: "Failed to add funds" });
-        db.get(`SELECT balance FROM users WHERE email = ?`, [email], (err, row) => {
-            res.json({ success: true, balance: row.balance });
+// DAILY BONUS ROUTE ($1 Daily)
+app.post('/api/claim-bonus', (req, res) => {
+    const { email } = req.body;
+    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+
+    db.get(`SELECT last_bonus_date, balance FROM users WHERE email = ?`, [email], (err, user) => {
+        if (err || !user) return res.status(400).json({ error: "User not found" });
+
+        if (user.last_bonus_date === today) {
+            return res.status(400).json({ error: "You have already claimed your daily bonus today! Come back tomorrow." });
+        }
+
+        db.run(`UPDATE users SET balance = balance + 1.0, last_bonus_date = ? WHERE email = ?`, [today, email], function(err) {
+            if (err) return res.status(500).json({ error: "Failed to claim bonus" });
+            db.get(`SELECT balance FROM users WHERE email = ?`, [email], (err, updatedUser) => {
+                res.json({ success: true, balance: updatedUser.balance, message: "Successfully claimed $1 Daily Bonus!" });
+            });
         });
     });
 });
@@ -65,13 +74,27 @@ app.get('/api/countries', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Failed" }); }
 });
 
-app.get('/api/services', async (req, res) => {
+// Services with calculated prices for dropdown
+app.get('/api/services-with-prices', async (req, res) => {
     const { country } = req.query;
     try {
         const response = await axios.get(`${BASE_URL}/guest/prices?country=${country}`);
         const countryData = response.data[country];
-        if(!countryData) return res.json([]);
-        res.json(Object.keys(countryData));
+        if(!countryData) return res.json({});
+
+        const servicePrices = {};
+        for (const [service, operators] of Object.entries(countryData)) {
+            let lowestPrice = Infinity;
+            for (const opKey of Object.keys(operators)) {
+                if (operators[opKey].cost < lowestPrice) {
+                    lowestPrice = operators[opKey].cost;
+                }
+            }
+            if(lowestPrice !== Infinity) {
+                servicePrices[service] = (lowestPrice * ADMIN_MARGIN).toFixed(3);
+            }
+        }
+        res.json(servicePrices);
     } catch (error) { res.status(500).json({ error: "Failed to fetch services" }); }
 });
 
@@ -115,16 +138,24 @@ app.post('/api/buy', async (req, res) => {
                 const orderId = response.data.id.toString();
                 const phone = response.data.phone;
 
-                // Deduct balance from user wallet
                 db.run(`UPDATE users SET balance = balance - ? WHERE email = ?`, [finalPrice, email]);
                 db.run(`INSERT INTO orders (id, user_email, service, phone, status, code) VALUES (?, ?, ?, ?, ?, ?)`, [orderId, email, service, phone, 'WAITING', '-']);
 
-                res.json({ id: orderId, phone, newBalance: user.balance - finalPrice });
+                res.json({ id: orderId, phone });
             } catch (buyErr) {
                 res.status(500).json({ error: "Number out of stock or buy failed" });
             }
         });
     } catch (error) { res.status(500).json({ error: "Process failed" }); }
+});
+
+// Fetch user orders history from database
+app.get('/api/orders', (req, res) => {
+    const { email } = req.query;
+    db.all(`SELECT * FROM orders WHERE user_email = ? ORDER BY created_at DESC`, [email], (err, rows) => {
+        if (err) return res.status(500).json({ error: "Failed to fetch orders" });
+        res.json(rows);
+    });
 });
 
 app.get('/api/check/:id', async (req, res) => {
@@ -144,12 +175,6 @@ app.get('/api/check/:id', async (req, res) => {
 
 app.get('/api/cancel/:id', async (req, res) => {
     const orderId = req.params.id;
-    // Refund balance to user on cancel
-    db.get(`SELECT * FROM orders WHERE id = ?`, [orderId], (err, order) => {
-        if (order && order.status === 'WAITING') {
-            // Optional: Refund logic can be added here if needed
-        }
-    });
     try {
         const response = await axios.get(`${BASE_URL}/user/cancel/${orderId}`, { headers });
         db.run(`UPDATE orders SET status = 'REFUNDED' WHERE id = ?`, [orderId]);
