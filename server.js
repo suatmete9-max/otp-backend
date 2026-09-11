@@ -89,10 +89,11 @@ app.post('/api/deposit', (req, res) => {
     db.run(`INSERT INTO transactions (user_email, type, amount, details) VALUES (?, ?, ?, ?)`, [email, 'CRYPTO DEPOSIT', amount, `TxID: ${txId} (Pending Verification)`], function(err) {
         if(err) return res.status(500).json({ error: "Failed" });
         
+        // Give $0.05 referral bonus on first deposit if referred
         db.get(`SELECT referred_by FROM users WHERE email = ?`, [email], (err, u) => {
             if(u && u.referred_by) {
-                db.run(`UPDATE users SET balance = balance + 5.0 WHERE ref_code = ?`, [u.referred_by]);
-                db.run(`INSERT INTO transactions (user_email, type, amount, details) VALUES ((SELECT email FROM users WHERE ref_code = ?), ?, ?, ?)`, [u.referred_by, 'REFERRAL BONUS', 5.0, `Bonus from referral deposit`]);
+                db.run(`UPDATE users SET balance = balance + 0.05 WHERE ref_code = ?`, [u.referred_by]);
+                db.run(`INSERT INTO transactions (user_email, type, amount, details) VALUES ((SELECT email FROM users WHERE ref_code = ?), ?, ?, ?)`, [u.referred_by, 'REFERRAL BONUS', 0.05, `Bonus from referral deposit`]);
             }
         });
 
@@ -100,7 +101,7 @@ app.post('/api/deposit', (req, res) => {
     });
 });
 
-// MULTI-SERVER CHUNKED COUNTRIES (Server 1, Server 2, Server 3 for high speed)
+// SERVER 1, SERVER 2, SERVER 3 (Dividing countries into 3 equal chunks for fast load)
 app.get('/api/countries/:serverNum', async (req, res) => {
     const serverNum = parseInt(req.params.serverNum) || 1;
     try {
