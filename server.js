@@ -18,7 +18,6 @@ const JWT_SECRET = process.env.JWT_SECRET || 'super-secure-otp-hub-secret-key-99
 const BASE_URL = 'https://5sim.net/v1';
 const headers = { 'Authorization': `Bearer ${API_KEY}`, 'Accept': 'application/json' };
 
-// SAFE PRICING MARGIN: 2x Markup (e.g. $0.30 cost becomes $0.60 selling price)
 const ADMIN_MARGIN = 2.0; 
 const ADMIN_EMAIL = 'bc115078@gmail.com';
 
@@ -278,19 +277,26 @@ app.get('/api/operators', authenticateToken, async (req, res) => {
 
         let operatorsList = [];
         for (const [opName, opDetails] of Object.entries(serviceData)) {
-            // SAFE MULTIPLIER: Cost * 2.0 (Ensures no loss, exact profit margin)
             const rawCost = opDetails.cost || 0.05;
-            operatorsList.push({
-                operator: opName,
-                cost: rawCost * ADMIN_MARGIN,
-                count: opDetails.count || 0
-            });
+            const count = opDetails.count || 0;
+            // Only include operators that actually have stock available (count > 0)
+            if (count > 0) {
+                operatorsList.push({
+                    operator: opName,
+                    cost: rawCost * ADMIN_MARGIN,
+                    count: count
+                });
+            }
         }
+        
+        // Sort operators from cheapest to most expensive so the user always sees the lowest price first
+        operatorsList.sort((a, b) => a.cost - b.cost);
+
         res.json(operatorsList);
     } catch (error) { res.json([]); }
 });
 
-// SAFE BUY ROUTE WITH EXACT OPERATOR COST & 2X PROFIT PROTECTION
+// SMART BUY ROUTE: STRICTLY PICKS CHEAPEST IN-STOCK OPERATOR FIRST
 app.post('/api/buy', authenticateToken, buyLimiter, async (req, res) => {
     const { country, service, operator } = req.body;
     const selectedOp = operator ? operator.toLowerCase() : 'any';
@@ -305,12 +311,34 @@ app.post('/api/buy', authenticateToken, buyLimiter, async (req, res) => {
             const pricesRes = await axios.get(`${BASE_URL}/guest/prices?country=${country}&product=${service}`);
             const serviceData = pricesRes.data[country] && pricesRes.data[country][service] ? pricesRes.data[country][service] : null;
             
-            let opCost = 0.05;
-            if (serviceData) {
-                const foundKey = Object.keys(serviceData).find(k => k.toLowerCase() === selectedOp);
-                if (foundKey) opCost = serviceData[foundKey].cost;
-                else if (serviceData['any']) opCost = serviceData['any'].cost;
-                else opCost = serviceData[Object.keys(serviceData)[0]].cost;
+            if (!serviceData) return res.status(500).json({ error: "Service currently out of stock." });
+
+            // Build a sorted list of available operators with stock > 0
+            let availableOps = [];
+            for (const [opName, opDetails] of Object.entries(serviceData)) {
+                if ((opDetails.count || 0) > 0) {
+                    availableOps.push({
+                        name: opName.toLowerCase(),
+                        cost: opDetails.cost || 0.05
+                    });
+                }
+            }
+
+            // Sort by cheapest cost first
+            availableOps.sort((a, b) => a.cost - b.cost);
+
+            if (availableOps.length === 0) {
+                return res.status(500).json({ error: "Number currently out of stock from provider." });
+            }
+
+            // Determine best operator to buy from (prioritize user selection if in stock, else pick absolute cheapest)
+            let chosenOp = availableOps[0].name;
+            let opCost = availableOps[0].cost;
+
+            const userSelectedMatch = availableOps.find(o => o.name === selectedOp);
+            if (userSelectedMatch) {
+                chosenOp = userSelectedMatch.name;
+                opCost = userSelectedMatch.cost;
             }
 
             const finalPrice = opCost * ADMIN_MARGIN; // Exact 2x Selling Price
@@ -318,15 +346,13 @@ app.post('/api/buy', authenticateToken, buyLimiter, async (req, res) => {
 
             let orderId = null;
             let phone = null;
-            let successfulOp = selectedOp;
-            let operatorsToTry = [selectedOp, 'any'];
-            if (serviceData) {
-                Object.keys(serviceData).forEach(k => {
-                    if (!operatorsToTry.includes(k.toLowerCase())) operatorsToTry.push(k.toLowerCase());
-                });
-            }
+            let successfulOp = chosenOp;
 
-            for (const op of operatorsToTry) {
+            // Try purchasing using sorted available options
+            let tryList = [chosenOp, 'any', ...availableOps.map(o => o.name)];
+            let uniqueTryList = [...new Set(tryList)];
+
+            for (const op of uniqueTryList) {
                 try {
                     const response = await axios.get(`${BASE_URL}/user/buy/activation/${country}/${op}/${service}`, { headers });
                     if (response.data && response.data.id && response.data.phone) {
