@@ -17,6 +17,8 @@ const API_KEY = process.env.API_KEY;
 const JWT_SECRET = process.env.JWT_SECRET || 'super-secure-otp-hub-secret-key-999!@#';
 const BASE_URL = 'https://5sim.net/v1';
 const headers = { 'Authorization': `Bearer ${API_KEY}`, 'Accept': 'application/json' };
+
+// SAFE PRICING MARGIN: 2x Markup (e.g. $0.30 cost becomes $0.60 selling price)
 const ADMIN_MARGIN = 2.0; 
 const ADMIN_EMAIL = 'bc115078@gmail.com';
 
@@ -32,7 +34,7 @@ const db = new sqlite3.Database('./otp_database.db', (err) => {
 });
 
 db.serialize(() => {
-    db.run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, email TEXT UNIQUE, password TEXT, balance REAL DEFAULT 0.0, last_bonus_date TEXT, ref_code TEXT, referred_by TEXT, is_admin INTEGER DEFAULT 0)`);
+    db.run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, email TEXT UNIQUE, password TEXT, balance REAL DEFAULT 0.0, last_bonus_date TEXT, ref_code TEXT, referred_by TEXT, is_admin INTEGER DEFAULT 0, is_frozen INTEGER DEFAULT 0)`);
     db.run(`CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, user_email TEXT, service TEXT, phone TEXT, status TEXT, code TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
     db.run(`CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT, type TEXT, amount REAL, details TEXT, status TEXT DEFAULT 'PENDING', created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
 });
@@ -65,7 +67,7 @@ app.post('/api/signup', authLimiter, async (req, res) => {
         const myRefCode = 'M' + Math.floor(100000 + Math.random() * 900000);
         const isAdmin = (cleanEmail === ADMIN_EMAIL.toLowerCase()) ? 1 : 0;
 
-        db.run(`INSERT INTO users (name, email, password, balance, last_bonus_date, ref_code, referred_by, is_admin) VALUES (?, ?, ?, 10.0, '', ?, ?, ?)`, 
+        db.run(`INSERT INTO users (name, email, password, balance, last_bonus_date, ref_code, referred_by, is_admin, is_frozen) VALUES (?, ?, ?, 10.0, '', ?, ?, ?, 0)`, 
         [name ? name.trim() : 'User', cleanEmail, hashedPassword, myRefCode, refCode ? refCode.trim() : '', isAdmin], function(err) {
             if (err) return res.status(400).json({ error: "Email already registered!" });
             res.json({ success: true, message: "Account created successfully!" });
@@ -81,6 +83,7 @@ app.post('/api/login', authLimiter, async (req, res) => {
 
         db.get(`SELECT * FROM users WHERE email = ?`, [cleanEmail], async (err, user) => {
             if (err || !user) return res.status(400).json({ error: "Invalid email or password!" });
+            if (user.is_frozen === 1) return res.status(403).json({ error: "Your account has been frozen by admin!" });
 
             const validPassword = await bcrypt.compare(password, user.password);
             if (!validPassword) return res.status(400).json({ error: "Invalid email or password!" });
@@ -110,8 +113,9 @@ app.post('/api/forgot-password', authLimiter, async (req, res) => {
 app.get('/api/user-balance', authenticateToken, (req, res) => {
     const email = req.user ? req.user.email : req.query.email;
     if(!email) return res.status(400).json({ error: "Unauthorized" });
-    db.get(`SELECT balance FROM users WHERE email = ?`, [email.toLowerCase()], (err, row) => {
+    db.get(`SELECT balance, is_frozen FROM users WHERE email = ?`, [email.toLowerCase()], (err, row) => {
         if (err || !row) return res.json({ balance: 10.0 });
+        if (row.is_frozen === 1) return res.status(403).json({ error: "Account frozen" });
         res.json({ balance: row.balance });
     });
 });
@@ -133,10 +137,52 @@ app.post('/api/admin/approve-deposit', authenticateToken, requireAdmin, (req, re
             db.run(`UPDATE transactions SET status = 'APPROVED' WHERE id = ?`, [depositId]);
             db.run(`UPDATE users SET balance = balance + ? WHERE email = ?`, [dep.amount, dep.user_email]);
             db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, 
-            [dep.user_email, 'ADMIN FUND ADD', dep.amount, `Approved Tx ID: ${dep.id}`, 'APPROVED'], (err) => {
+            [dep.user_email, 'CRYPTO DEPOSIT', dep.amount, `Approved Deposit (Tx ID: ${dep.id})`, 'APPROVED'], (err) => {
                 if (err) { db.run(`ROLLBACK`); return res.status(500).json({ error: "Failed" }); }
                 db.run(`COMMIT`);
                 res.json({ success: true, message: `Successfully approved $${dep.amount}` });
+            });
+        });
+    });
+});
+
+app.get('/api/admin/users', authenticateToken, requireAdmin, (req, res) => {
+    db.all(`SELECT email, name, balance, ref_code, referred_by, is_frozen FROM users ORDER BY id DESC`, [], (err, rows) => {
+        if (err) return res.status(500).json({ error: "Failed to fetch users" });
+        res.json(rows);
+    });
+});
+
+app.post('/api/admin/freeze-user', authenticateToken, requireAdmin, (req, res) => {
+    const { email, freeze } = req.body;
+    db.run(`UPDATE users SET is_frozen = ? WHERE email = ?`, [freeze ? 1 : 0, email.trim().toLowerCase()], function(err) {
+        if (err) return res.status(500).json({ error: "Failed to update user status" });
+        res.json({ success: true, message: `User account successfully ${freeze ? 'frozen' : 'unfrozen'}!` });
+    });
+});
+
+app.post('/api/admin/manage-balance', authenticateToken, requireAdmin, (req, res) => {
+    const { email, amount, action, reason } = req.body;
+    const targetEmail = email.trim().toLowerCase();
+    const val = parseFloat(amount);
+
+    if (!val || val <= 0) return res.status(400).json({ error: "Invalid amount" });
+
+    db.get(`SELECT * FROM users WHERE email = ?`, [targetEmail], (err, user) => {
+        if (err || !user) return res.status(404).json({ error: "User not found" });
+
+        const newBalance = action === 'add' ? user.balance + val : Math.max(0, user.balance - val);
+        const txType = action === 'add' ? 'ADMIN FUND ADD' : 'ADMIN FUND DEDUCT';
+        const detailsText = reason ? `Admin Note: ${reason}` : `Admin Manual Update`;
+
+        db.serialize(() => {
+            db.run(`BEGIN TRANSACTION`);
+            db.run(`UPDATE users SET balance = ? WHERE email = ?`, [newBalance, targetEmail]);
+            db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, 
+            [targetEmail, txType, val, detailsText, 'APPROVED'], (err) => {
+                if (err) { db.run(`ROLLBACK`); return res.status(500).json({ error: "Transaction failed" }); }
+                db.run(`COMMIT`);
+                res.json({ success: true, message: `Successfully ${action === 'add' ? 'added $' + val : 'deducted $' + val} for ${targetEmail}` });
             });
         });
     });
@@ -150,6 +196,7 @@ app.post('/api/apply-referral', authenticateToken, (req, res) => {
     db.get(`SELECT * FROM users WHERE email = ?`, [email.toLowerCase()], (err, user) => {
         if (err || !user) return res.status(400).json({ error: "User not found" });
         if (user.referred_by) return res.status(400).json({ error: "Already applied a referral code!" });
+        if (user.ref_code === refCode.trim()) return res.status(400).json({ error: "Cannot use your own referral code!" });
 
         db.get(`SELECT * FROM users WHERE ref_code = ?`, [refCode.trim()], (err, referrer) => {
             if (err || !referrer) return res.status(400).json({ error: "Invalid referral code!" });
@@ -157,7 +204,7 @@ app.post('/api/apply-referral', authenticateToken, (req, res) => {
             db.serialize(() => {
                 db.run(`BEGIN TRANSACTION`);
                 db.run(`UPDATE users SET referred_by = ?, balance = balance + 0.05 WHERE email = ?`, [refCode.trim(), email.toLowerCase()]);
-                db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [email.toLowerCase(), 'REFERRAL BONUS', 0.05, `Bonus from code`, 'APPROVED'], (err) => {
+                db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [email.toLowerCase(), 'REFERRAL BONUS', 0.05, `Bonus from code ${refCode.trim()}`, 'APPROVED'], (err) => {
                     if (err) { db.run(`ROLLBACK`); return res.status(500).json({ error: "Failed" }); }
                     db.run(`COMMIT`);
                     db.get(`SELECT balance FROM users WHERE email = ?`, [email.toLowerCase()], (err, updatedUser) => {
@@ -231,9 +278,11 @@ app.get('/api/operators', authenticateToken, async (req, res) => {
 
         let operatorsList = [];
         for (const [opName, opDetails] of Object.entries(serviceData)) {
+            // SAFE MULTIPLIER: Cost * 2.0 (Ensures no loss, exact profit margin)
+            const rawCost = opDetails.cost || 0.05;
             operatorsList.push({
                 operator: opName,
-                cost: (opDetails.cost || 0.05) * ADMIN_MARGIN,
+                cost: rawCost * ADMIN_MARGIN,
                 count: opDetails.count || 0
             });
         }
@@ -241,48 +290,35 @@ app.get('/api/operators', authenticateToken, async (req, res) => {
     } catch (error) { res.json([]); }
 });
 
-// ULTIMATE ULTRA-FAST BUY ROUTE WITH MULTI-OPERATOR FALLBACK & CASE INSENSITIVITY
+// SAFE BUY ROUTE WITH EXACT OPERATOR COST & 2X PROFIT PROTECTION
 app.post('/api/buy', authenticateToken, buyLimiter, async (req, res) => {
     const { country, service, operator } = req.body;
     const selectedOp = operator ? operator.toLowerCase() : 'any';
     const userEmail = (req.user && req.user.email) ? req.user.email : (req.body.email ? req.body.email.trim().toLowerCase() : null);
 
-    if (!userEmail) {
-        return res.status(400).json({ error: "User email required. Please logout and login again." });
-    }
+    if (!userEmail) return res.status(400).json({ error: "User email required." });
 
-    try {
-        const pricesRes = await axios.get(`${BASE_URL}/guest/prices?country=${country}&product=${service}`);
-        const serviceData = pricesRes.data[country] && pricesRes.data[country][service] ? pricesRes.data[country][service] : null;
-        
-        let opCost = 0.05;
-        if (serviceData) {
-            const foundKey = Object.keys(serviceData).find(k => k.toLowerCase() === selectedOp);
-            if (foundKey) {
-                opCost = serviceData[foundKey].cost;
-            } else if (serviceData['any']) {
-                opCost = serviceData['any'].cost;
-            } else {
-                const firstKey = Object.keys(serviceData)[0];
-                opCost = serviceData[firstKey].cost;
-            }
-        }
+    db.get(`SELECT balance, is_frozen FROM users WHERE email = ?`, [userEmail], async (err, user) => {
+        if (!user || user.is_frozen === 1) return res.status(403).json({ error: "Account is frozen or not found." });
 
-        const finalPrice = opCost * ADMIN_MARGIN;
-
-        db.get(`SELECT balance FROM users WHERE email = ?`, [userEmail], async (err, user) => {
-            if (!user) {
-                db.run(`INSERT INTO users (name, email, password, balance, ref_code) VALUES (?, ?, '123456', 10.0, 'M999999')`, [userEmail.split('@')[0], userEmail]);
-            }
+        try {
+            const pricesRes = await axios.get(`${BASE_URL}/guest/prices?country=${country}&product=${service}`);
+            const serviceData = pricesRes.data[country] && pricesRes.data[country][service] ? pricesRes.data[country][service] : null;
             
-            const currentBal = user ? user.balance : 10.0;
-            if (currentBal < finalPrice) return res.status(400).json({ error: "Insufficient wallet balance!" });
+            let opCost = 0.05;
+            if (serviceData) {
+                const foundKey = Object.keys(serviceData).find(k => k.toLowerCase() === selectedOp);
+                if (foundKey) opCost = serviceData[foundKey].cost;
+                else if (serviceData['any']) opCost = serviceData['any'].cost;
+                else opCost = serviceData[Object.keys(serviceData)[0]].cost;
+            }
+
+            const finalPrice = opCost * ADMIN_MARGIN; // Exact 2x Selling Price
+            if (user.balance < finalPrice) return res.status(400).json({ error: "Insufficient wallet balance!" });
 
             let orderId = null;
             let phone = null;
             let successfulOp = selectedOp;
-
-            // List of operators to try in order of priority (Selected -> Any -> All available)
             let operatorsToTry = [selectedOp, 'any'];
             if (serviceData) {
                 Object.keys(serviceData).forEach(k => {
@@ -299,14 +335,10 @@ app.post('/api/buy', authenticateToken, buyLimiter, async (req, res) => {
                         successfulOp = op;
                         break;
                     }
-                } catch (e) {
-                    // Try next operator
-                }
+                } catch (e) {}
             }
 
-            if (!orderId || !phone) {
-                return res.status(500).json({ error: "Number currently out of stock from provider." });
-            }
+            if (!orderId || !phone) return res.status(500).json({ error: "Number currently out of stock from provider." });
 
             db.serialize(() => {
                 db.run(`BEGIN TRANSACTION`);
@@ -318,8 +350,8 @@ app.post('/api/buy', authenticateToken, buyLimiter, async (req, res) => {
                     res.json({ id: orderId, phone });
                 });
             });
-        });
-    } catch (error) { res.status(500).json({ error: "Process failed or out of stock." }); }
+        } catch (error) { res.status(500).json({ error: "Process failed or out of stock." }); }
+    });
 });
 
 app.get('/api/history', authenticateToken, (req, res) => {
@@ -337,7 +369,6 @@ app.get('/api/history', authenticateToken, (req, res) => {
 
 app.get('/api/check/:id', authenticateToken, (req, res) => {
     const orderId = req.params.id;
-
     db.get(`SELECT * FROM orders WHERE id = ?`, [orderId], async (err, order) => {
         if (err || !order) return res.status(403).json({ error: "Order not found" });
         if (order.status === 'SUCCESS') return res.json({ status: 'RECEIVED', code: order.code });
@@ -358,13 +389,11 @@ app.get('/api/check/:id', authenticateToken, (req, res) => {
 
 app.get('/api/cancel/:id', authenticateToken, (req, res) => {
     const orderId = req.params.id;
-
     db.get(`SELECT * FROM orders WHERE id = ? AND status = 'WAITING'`, [orderId], async (err, order) => {
         if (err || !order) return res.status(403).json({ error: "Order cannot be canceled" });
 
         try {
             const response = await axios.get(`${BASE_URL}/user/cancel/${orderId}`, { headers });
-            
             db.get(`SELECT amount FROM transactions WHERE details LIKE ?`, [`%${order.phone}%`], (err, tx) => {
                 const refundAmount = tx ? tx.amount : 0;
 
@@ -376,7 +405,7 @@ app.get('/api/cancel/:id', authenticateToken, (req, res) => {
                         db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [order.user_email, 'REFUND', refundAmount, `Refund for order ${orderId}`, 'APPROVED']);
                     }
                     db.run(`COMMIT`);
-                    res.json({ status: response.data.status });
+                    res.json({ status: response.status });
                 });
             });
         } catch (error) { res.status(500).json({ error: "Cancel failed" }); }
