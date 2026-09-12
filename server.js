@@ -24,7 +24,7 @@ let cache = { countries: null, countriesTime: 0, services: {}, prices: {} };
 const CACHE_TTL = 30 * 1000; 
 
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 50, message: { error: "Too many attempts, please try again later." } });
-const buyLimiter = rateLimit({ windowMs: 60 * 1000, max: 20, message: { error: "Too many requests, please slow down." } });
+const buyLimiter = rateLimit({ windowMs: 60 * 1000, max: 30, message: { error: "Too many requests, please slow down." } });
 
 const db = new sqlite3.Database('./otp_database.db', (err) => {
     if (err) console.error('Database error', err);
@@ -217,7 +217,7 @@ app.get('/api/services', authenticateToken, async (req, res) => {
         const countryData = response.data[country];
         if(!countryData) return res.json(['any']);
         let allKeys = Object.keys(countryData);
-        if (!allKeys.includes('any')) allKeys.includes('any') || allKeys.push('any');
+        if (!allKeys.includes('any')) allKeys.push('any');
         res.json(allKeys);
     } catch (error) { res.json(['any']); }
 });
@@ -241,10 +241,10 @@ app.get('/api/operators', authenticateToken, async (req, res) => {
     } catch (error) { res.json([]); }
 });
 
-// BULLET-PROOF SMART BUY ROUTE WITH MULTI-FALLBACK (GUARANTEED STOCK MATCH)
+// ULTIMATE ULTRA-FAST BUY ROUTE WITH MULTI-OPERATOR FALLBACK & CASE INSENSITIVITY
 app.post('/api/buy', authenticateToken, buyLimiter, async (req, res) => {
     const { country, service, operator } = req.body;
-    const selectedOp = operator || 'any';
+    const selectedOp = operator ? operator.toLowerCase() : 'any';
     const userEmail = (req.user && req.user.email) ? req.user.email : (req.body.email ? req.body.email.trim().toLowerCase() : null);
 
     if (!userEmail) {
@@ -256,13 +256,16 @@ app.post('/api/buy', authenticateToken, buyLimiter, async (req, res) => {
         const serviceData = pricesRes.data[country] && pricesRes.data[country][service] ? pricesRes.data[country][service] : null;
         
         let opCost = 0.05;
-        if (serviceData && serviceData[selectedOp]) {
-            opCost = serviceData[selectedOp].cost;
-        } else if (serviceData && serviceData['any']) {
-            opCost = serviceData['any'].cost;
-        } else if (serviceData) {
-            const firstKey = Object.keys(serviceData)[0];
-            opCost = serviceData[firstKey].cost;
+        if (serviceData) {
+            const foundKey = Object.keys(serviceData).find(k => k.toLowerCase() === selectedOp);
+            if (foundKey) {
+                opCost = serviceData[foundKey].cost;
+            } else if (serviceData['any']) {
+                opCost = serviceData['any'].cost;
+            } else {
+                const firstKey = Object.keys(serviceData)[0];
+                opCost = serviceData[firstKey].cost;
+            }
         }
 
         const finalPrice = opCost * ADMIN_MARGIN;
@@ -279,31 +282,25 @@ app.post('/api/buy', authenticateToken, buyLimiter, async (req, res) => {
             let phone = null;
             let successfulOp = selectedOp;
 
-            // ATTEMPT 1: Try purchasing with the selected operator
-            try {
-                const response = await axios.get(`${BASE_URL}/user/buy/activation/${country}/${selectedOp}/${service}`, { headers });
-                orderId = response.data.id.toString();
-                phone = response.data.phone;
-            } catch (err1) {
-                // ATTEMPT 2: Fallback to 'any' operator automatically if specific operator fails
+            // List of operators to try in order of priority (Selected -> Any -> All available)
+            let operatorsToTry = [selectedOp, 'any'];
+            if (serviceData) {
+                Object.keys(serviceData).forEach(k => {
+                    if (!operatorsToTry.includes(k.toLowerCase())) operatorsToTry.push(k.toLowerCase());
+                });
+            }
+
+            for (const op of operatorsToTry) {
                 try {
-                    const fallbackRes = await axios.get(`${BASE_URL}/user/buy/activation/${country}/any/${service}`, { headers });
-                    orderId = fallbackRes.data.id.toString();
-                    phone = fallbackRes.data.phone;
-                    successfulOp = 'any';
-                } catch (err2) {
-                    // ATTEMPT 3: Fallback to first available operator in stock
-                    if (serviceData) {
-                        for (const opKey of Object.keys(serviceData)) {
-                            try {
-                                const lastRes = await axios.get(`${BASE_URL}/user/buy/activation/${country}/${opKey}/${service}`, { headers });
-                                orderId = lastRes.data.id.toString();
-                                phone = lastRes.data.phone;
-                                successfulOp = opKey;
-                                break;
-                            } catch (e) {}
-                        }
+                    const response = await axios.get(`${BASE_URL}/user/buy/activation/${country}/${op}/${service}`, { headers });
+                    if (response.data && response.data.id && response.data.phone) {
+                        orderId = response.data.id.toString();
+                        phone = response.data.phone;
+                        successfulOp = op;
+                        break;
                     }
+                } catch (e) {
+                    // Try next operator
                 }
             }
 
