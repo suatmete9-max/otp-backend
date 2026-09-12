@@ -217,7 +217,7 @@ app.get('/api/services', authenticateToken, async (req, res) => {
         const countryData = response.data[country];
         if(!countryData) return res.json(['any']);
         let allKeys = Object.keys(countryData);
-        if (!allKeys.includes('any')) allKeys.push('any');
+        if (!allKeys.includes('any')) allKeys.includes('any') || allKeys.push('any');
         res.json(allKeys);
     } catch (error) { res.json(['any']); }
 });
@@ -241,7 +241,7 @@ app.get('/api/operators', authenticateToken, async (req, res) => {
     } catch (error) { res.json([]); }
 });
 
-// 100% BULLET-PROOF BUY ROUTE (Auto-extracts email from JWT or request body)
+// BULLET-PROOF SMART BUY ROUTE WITH MULTI-FALLBACK (GUARANTEED STOCK MATCH)
 app.post('/api/buy', authenticateToken, buyLimiter, async (req, res) => {
     const { country, service, operator } = req.body;
     const selectedOp = operator || 'any';
@@ -275,26 +275,54 @@ app.post('/api/buy', authenticateToken, buyLimiter, async (req, res) => {
             const currentBal = user ? user.balance : 10.0;
             if (currentBal < finalPrice) return res.status(400).json({ error: "Insufficient wallet balance!" });
 
+            let orderId = null;
+            let phone = null;
+            let successfulOp = selectedOp;
+
+            // ATTEMPT 1: Try purchasing with the selected operator
             try {
                 const response = await axios.get(`${BASE_URL}/user/buy/activation/${country}/${selectedOp}/${service}`, { headers });
-                const orderId = response.data.id.toString();
-                const phone = response.data.phone;
-
-                db.serialize(() => {
-                    db.run(`BEGIN TRANSACTION`);
-                    db.run(`UPDATE users SET balance = MAX(0, balance - ?) WHERE email = ?`, [finalPrice, userEmail]);
-                    db.run(`INSERT INTO orders (id, user_email, service, phone, status, code) VALUES (?, ?, ?, ?, ?, ?)`, [orderId, userEmail, service, phone, 'WAITING', '-']);
-                    db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [userEmail, 'NUMBER PURCHASE', finalPrice, `Service: ${service} (${phone}) [Op: ${selectedOp}]`, 'APPROVED'], (err) => {
-                        if (err) { db.run(`ROLLBACK`); return res.status(500).json({ error: "Failed" }); }
-                        db.run(`COMMIT`);
-                        res.json({ id: orderId, phone });
-                    });
-                });
-            } catch (buyErr) {
-                res.status(500).json({ error: "Number currently out of stock from provider." });
+                orderId = response.data.id.toString();
+                phone = response.data.phone;
+            } catch (err1) {
+                // ATTEMPT 2: Fallback to 'any' operator automatically if specific operator fails
+                try {
+                    const fallbackRes = await axios.get(`${BASE_URL}/user/buy/activation/${country}/any/${service}`, { headers });
+                    orderId = fallbackRes.data.id.toString();
+                    phone = fallbackRes.data.phone;
+                    successfulOp = 'any';
+                } catch (err2) {
+                    // ATTEMPT 3: Fallback to first available operator in stock
+                    if (serviceData) {
+                        for (const opKey of Object.keys(serviceData)) {
+                            try {
+                                const lastRes = await axios.get(`${BASE_URL}/user/buy/activation/${country}/${opKey}/${service}`, { headers });
+                                orderId = lastRes.data.id.toString();
+                                phone = lastRes.data.phone;
+                                successfulOp = opKey;
+                                break;
+                            } catch (e) {}
+                        }
+                    }
+                }
             }
+
+            if (!orderId || !phone) {
+                return res.status(500).json({ error: "Number currently out of stock from provider." });
+            }
+
+            db.serialize(() => {
+                db.run(`BEGIN TRANSACTION`);
+                db.run(`UPDATE users SET balance = MAX(0, balance - ?) WHERE email = ?`, [finalPrice, userEmail]);
+                db.run(`INSERT INTO orders (id, user_email, service, phone, status, code) VALUES (?, ?, ?, ?, ?, ?)`, [orderId, userEmail, service, phone, 'WAITING', '-']);
+                db.run(`INSERT INTO transactions (user_email, type, amount, details, status) VALUES (?, ?, ?, ?, ?)`, [userEmail, 'NUMBER PURCHASE', finalPrice, `Service: ${service} (${phone}) [Op: ${successfulOp}]`, 'APPROVED'], (err) => {
+                    if (err) { db.run(`ROLLBACK`); return res.status(500).json({ error: "Failed" }); }
+                    db.run(`COMMIT`);
+                    res.json({ id: orderId, phone });
+                });
+            });
         });
-    } catch (error) { res.status(500).json({ error: "Process failed." }); }
+    } catch (error) { res.status(500).json({ error: "Process failed or out of stock." }); }
 });
 
 app.get('/api/history', authenticateToken, (req, res) => {
@@ -312,7 +340,6 @@ app.get('/api/history', authenticateToken, (req, res) => {
 
 app.get('/api/check/:id', authenticateToken, (req, res) => {
     const orderId = req.params.id;
-    const email = (req.user && req.user.email) ? req.user.email : null;
 
     db.get(`SELECT * FROM orders WHERE id = ?`, [orderId], async (err, order) => {
         if (err || !order) return res.status(403).json({ error: "Order not found" });
@@ -334,7 +361,6 @@ app.get('/api/check/:id', authenticateToken, (req, res) => {
 
 app.get('/api/cancel/:id', authenticateToken, (req, res) => {
     const orderId = req.params.id;
-    const email = (req.user && req.user.email) ? req.user.email : null;
 
     db.get(`SELECT * FROM orders WHERE id = ? AND status = 'WAITING'`, [orderId], async (err, order) => {
         if (err || !order) return res.status(403).json({ error: "Order cannot be canceled" });
